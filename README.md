@@ -6,17 +6,13 @@ a python cli that generates youtube shorts end-to-end using only free ai service
 
 ## screenshot — pipeline running
 
-> _replace this with a screenshot of the rich terminal ui during generation_
-
-![pipeline screenshot placeholder](docs/screenshots/pipeline.png)
+![pipeline screenshot](docs/Sffmpgaiss.png)
 
 ---
 
 ## screenshot — example output
 
-> _replace this with a frame from a generated short or a side-by-side of input/output_
-
-![output screenshot placeholder](docs/screenshots/output.png)
+![output screenshot](docs/ffmpeg2.png)
 
 ---
 
