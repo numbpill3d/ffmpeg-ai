@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Optional
 import typer
 from dotenv import load_dotenv
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
 
 from .ui.display import print_banner, console
 from .ai.openrouter import FREE_MODELS
@@ -14,9 +17,84 @@ load_dotenv()
 app = typer.Typer(
     name="ffmpeg-ai",
     help="AI-powered YouTube Shorts generator",
-    no_args_is_help=True,
     rich_markup_mode="rich",
+    invoke_without_command=True,
 )
+
+
+@app.callback()
+def main(ctx: typer.Context):
+    """AI-powered YouTube Shorts generator."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    print_banner()
+
+    # ── subcommands ──────────────────────────────────────────────────────────
+    cmd_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
+    cmd_table.add_column("cmd", style="bold cyan", no_wrap=True)
+    cmd_table.add_column("desc", style="white")
+    cmd_table.add_row("generate", "generate a YouTube Short from a topic  [dim](main command)[/]")
+    cmd_table.add_row("models",   "list available free OpenRouter models")
+    cmd_table.add_row("voices",   "list available TTS voices")
+    cmd_table.add_row("providers","list image generation providers + auth status")
+    console.print(Panel(cmd_table, title="[bold white]commands[/]", border_style="bright_black", box=box.ROUNDED))
+
+    # ── generate arguments ───────────────────────────────────────────────────
+    arg_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=True, padding=(0, 2))
+    arg_table.add_column("argument",  style="bold cyan",  no_wrap=True)
+    arg_table.add_column("type",      style="dim white",  no_wrap=True)
+    arg_table.add_column("default",   style="yellow",     no_wrap=True)
+    arg_table.add_column("description", style="white")
+
+    arg_table.add_row("TOPIC",          "str",  "(required)", "Topic or idea for the Short")
+    arg_table.add_row("-o / --output",  "path", "output/short.mp4", "Output file path")
+    arg_table.add_row("-d / --duration","int",  "45",         "Target duration in seconds (max 58)")
+    arg_table.add_row("-m / --model",   "str",  "llama-3.3-70b:free", "OpenRouter model ID (see: ffmpeg-ai models)")
+    arg_table.add_row("-v / --voice",   "str",  "en-female",  f"TTS voice key: {', '.join(VOICES.keys())}  (see: ffmpeg-ai voices)")
+    arg_table.add_row("-M / --music",   "path", "none",       "Background music file (MP3/WAV) — auto-ducked under narration")
+    arg_table.add_row("-I / --images-dir","path","none",      "Use images from this directory instead of AI generation")
+    arg_table.add_row("--no-ai-images", "flag", "off",        "Disable AI image generation (use PIL placeholders or --images-dir)")
+    arg_table.add_row("--providers",    "str",  "pollinations,huggingface", "Comma-separated image provider order")
+    arg_table.add_row("--dry-run",      "flag", "off",        "Generate script only — no video rendered")
+    console.print(Panel(arg_table, title="[bold white]generate — arguments[/]", border_style="bright_black", box=box.ROUNDED))
+
+    # ── examples ─────────────────────────────────────────────────────────────
+    ex_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
+    ex_table.add_column("label", style="dim white",  no_wrap=True, min_width=20)
+    ex_table.add_column("cmd",   style="bold green")
+
+    ex_table.add_row("basic",
+        'ffmpeg-ai generate "5 facts about black holes"')
+    ex_table.add_row("custom output",
+        'ffmpeg-ai generate "stoic morning routine" -o ~/Videos/stoic.mp4')
+    ex_table.add_row("longer short",
+        'ffmpeg-ai generate "how GPUs work" -d 58')
+    ex_table.add_row("different voice",
+        'ffmpeg-ai generate "ancient rome" -v en-male')
+    ex_table.add_row("different model",
+        f'ffmpeg-ai generate "dark matter" -m {FREE_MODELS[2]}')
+    ex_table.add_row("add background music",
+        'ffmpeg-ai generate "lofi study tips" -M assets/music/lofi.mp3')
+    ex_table.add_row("your own images",
+        'ffmpeg-ai generate "my travel vlog" -I ~/Pictures/trip/')
+    ex_table.add_row("no AI images",
+        'ffmpeg-ai generate "test topic" --no-ai-images -o test.mp4')
+    ex_table.add_row("huggingface images only",
+        'ffmpeg-ai generate "cyberpunk city" --providers huggingface')
+    ex_table.add_row("script preview only",
+        'ffmpeg-ai generate "mars colonization" --dry-run')
+    ex_table.add_row("full custom",
+        f'ffmpeg-ai generate "quantum computing" -d 50 -v en-news -m {FREE_MODELS[1]} -o out/quantum.mp4')
+    console.print(Panel(ex_table, title="[bold white]examples[/]", border_style="bright_black", box=box.ROUNDED))
+
+    # ── env vars ─────────────────────────────────────────────────────────────
+    env_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
+    env_table.add_column("var",   style="bold cyan",  no_wrap=True)
+    env_table.add_column("desc",  style="white")
+    env_table.add_row("OPENROUTER_API_KEY", "required for LLM script generation  [dim](free tier, no credit card)[/]")
+    env_table.add_row("HF_TOKEN",           "optional — enables HuggingFace image provider")
+    console.print(Panel(env_table, title="[bold white]env vars  (.env supported)[/]", border_style="bright_black", box=box.ROUNDED))
 
 
 @app.command()
