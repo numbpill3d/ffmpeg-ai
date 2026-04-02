@@ -62,29 +62,40 @@ async def _generate_script(topic: str, duration: int = 45, model: str = FREE_MOD
     """
     client = get_client()
     system = (
-        "You are a YouTube Shorts scriptwriter. You write punchy, engaging vertical video scripts. "
-        "Output strict JSON only, no markdown fences."
+        "You are an expert YouTube Shorts scriptwriter and visual creative director. "
+        "You craft emotionally compelling, viral vertical video scripts with precise cinematic visual direction. "
+        "Output strict JSON only — no markdown fences, no extra text, no comments."
     )
+    n_segments = max(5, duration // 7)
     user = f"""Write a {duration}-second YouTube Short script about: "{topic}"
 
-Return JSON with this exact shape:
+Return JSON with exactly this shape:
 {{
-  "title": "short catchy title",
-  "hook": "opening line (first 3 seconds, must grab attention)",
+  "title": "punchy curiosity-gap title, 5-8 words",
+  "hook": "opening line — ≤12 words, shocking stat, bold claim, or question that stops the scroll",
   "segments": [
-    {{"text": "narration text", "duration": 8, "visual": "describe what should appear on screen"}},
-    ...
+    {{
+      "text": "narration — direct, conversational, no filler words",
+      "duration": 7,
+      "visual": "precise visual direction: subject + action + framing + lighting mood"
+    }}
   ],
-  "cta": "call to action closing line",
-  "image_prompts": ["detailed image gen prompt 1", "prompt 2", ...]
+  "cta": "urgent closing CTA — max 10 words, creates FOMO or triggers follow",
+  "image_prompts": [
+    "ultra-detailed AI image generation prompt: subject, specific camera angle, lighting type, color palette, mood, photo style"
+  ]
 }}
 
-Rules:
-- hook must be ≤ 15 words, bold claim or question
-- segments total duration must be ≈ {duration - 5} seconds
-- each segment has a matching image_prompt entry
-- visuals should be vivid, cinematic, 9:16 vertical composition
-- language: direct, energetic, no filler words"""
+Requirements:
+- Produce exactly {n_segments} segments
+- Segment durations vary between 4–10s each — vary the pacing for rhythm (fast punchy opener, build in middle, climax near end)
+- Segments total duration ≈ {duration - 6}s
+- Produce exactly {n_segments} image_prompts (one per segment, in same order)
+- Image prompts MUST be highly specific: include subject, camera angle (low angle / bird's eye / extreme close-up / dutch tilt), lighting (golden hour / dramatic rim light / neon glow / harsh shadows / soft diffused), color palette (muted desaturated / vivid saturated / monochromatic / warm/cool contrast), visual style (photorealistic / cinematic / documentary / macro photography)
+- Image prompts MUST suit 9:16 vertical framing — tall subjects, vertical leading lines, portrait orientation
+- Script language: active voice, second person ("you"), present tense, conversational — no filler
+- Pacing: short punchy segments at start, slower deliberate builds in middle, high-energy climax near end
+- Each segment creates a distinct visual beat — varied energy, no two consecutive segments identical mood"""
 
     resp = await client.chat.completions.create(
         model=model,

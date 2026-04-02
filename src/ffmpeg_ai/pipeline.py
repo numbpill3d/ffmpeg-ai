@@ -203,7 +203,7 @@ async def run_pipeline(
     )
     console.print(Panel(
         stats_table({
-            "output": str(output_path),
+            "output": str(output_path.resolve()),
             "duration": f"{total_dur:.1f}s",
             "elapsed": f"{elapsed:.0f}s",
             "model": model,

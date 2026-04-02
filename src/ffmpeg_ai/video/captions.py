@@ -49,10 +49,11 @@ def audio_to_ass(audio_path: Path, output_path: Path, model_size: str = "base") 
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # PrimaryColour=white, SecondaryColour=yellow, Outline=black, Shadow
-        "Style: Default,Arial,65,"
-        "&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,"
-        "1,0,0,0,100,100,2,0,1,3,1,2,30,30,120,1\n"
+        # PrimaryColour=white, SecondaryColour=yellow, Outline=black, Shadow=dark
+        # FontSize=75, Outline=4, Shadow=2, MarginV=140 for TikTok-style legibility
+        "Style: Default,Arial,75,"
+        "&H00FFFFFF,&H0000FFFF,&H00000000,&HA0000000,"
+        "1,0,0,0,100,100,2,0,1,4,2,2,30,30,140,1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"

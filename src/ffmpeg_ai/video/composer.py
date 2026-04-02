@@ -27,7 +27,10 @@ def get_audio_duration(audio_path: Path) -> float:
 
 # ── Ken Burns motion styles ───────────────────────────────────────────────────
 
-MOTION_STYLES = ["zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down"]
+MOTION_STYLES = [
+    "zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down",
+    "diagonal_tr", "diagonal_bl", "subtle_zoom",
+]
 
 
 def _kenburns_filter(motion: str, duration: float) -> str:
@@ -63,6 +66,21 @@ def _kenburns_filter(motion: str, duration: float) -> str:
             f"zoompan=z=1.2:x='iw*(1-1/zoom)/2':y='ih*(1-1/zoom)*on/{d}'"
             f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
         )
+    if motion == "diagonal_tr":
+        return (
+            f"zoompan=z=1.25:x='iw*(1-1/zoom)*on/{d}':y='ih*(1-1/zoom)*(1-on/{d})'"
+            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+        )
+    if motion == "diagonal_bl":
+        return (
+            f"zoompan=z=1.25:x='iw*(1-1/zoom)*(1-on/{d})':y='ih*(1-1/zoom)*on/{d}'"
+            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+        )
+    if motion == "subtle_zoom":
+        return (
+            f"zoompan=z='min(zoom+0.0004,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+        )
     # fallback
     return (
         f"zoompan=z='min(zoom+0.0008,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
@@ -83,7 +101,7 @@ def image_to_video(
         "-loop", "1", "-i", str(image_path),
         "-vf", zoom_filter,
         "-t", str(duration),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p",
         str(output_path),
     ]
@@ -94,7 +112,9 @@ def image_to_video(
 # ── Concat ────────────────────────────────────────────────────────────────────
 
 _TRANSITION_TYPES = [
-    "fade", "fadeblack", "wipeleft", "wiperight", "slideleft", "slideright",
+    "fade", "fadeblack", "fadewhite",
+    "wipeleft", "wiperight", "wipeup", "wipedown",
+    "slideleft", "slideright", "slideup", "slidedown",
 ]
 
 

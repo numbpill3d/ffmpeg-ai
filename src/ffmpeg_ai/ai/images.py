@@ -1,10 +1,27 @@
 """Image acquisition: AI generation (multiple providers) and user-supplied images."""
 import asyncio
 import os
+import random
 import unicodedata
 import urllib.parse
 from pathlib import Path
 import httpx
+
+# Cinematic style suffixes appended to AI image prompts
+_CINEMATIC_STYLES = [
+    "cinematic vertical photography, dramatic lighting, hyper-realistic, ultra detailed, 4K",
+    "vertical cinematic shot, professional color grading, rich vivid colors, sharp focus, 8K",
+    "dramatic vertical composition, golden hour rim lighting, atmospheric depth, photorealistic",
+    "vertical portrait frame, high contrast dramatic lighting, rich color palette, ultra HD",
+    "cinematic wide angle vertical shot, moody atmosphere, detailed texture, professional photography",
+    "vertical frame, neon-accented dramatic lighting, deep shadows, cyberpunk realism, hyper detailed",
+    "vertical composition, soft cinematic bokeh, golden warm tones, shallow depth of field, film grain",
+]
+
+
+def _enrich_prompt(prompt: str) -> str:
+    """Append cinematic style modifiers to an image generation prompt."""
+    return f"{prompt}, {random.choice(_CINEMATIC_STYLES)}"
 
 # 9:16 vertical for Shorts
 IMG_WIDTH = 1080
@@ -76,27 +93,33 @@ def _make_placeholder(prompt: str, output_path: Path) -> Path:
 
 # ── Provider: Pollinations.ai (no auth) ──────────────────────────────────────
 
+_POLLINATIONS_MODELS = ["flux-realism", "flux"]
+
+
 async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None on failure (don't raise)."""
+    """Returns path on success, None on failure (don't raise).
+    Tries flux-realism first (better quality), falls back to flux.
+    """
     encoded = urllib.parse.quote(_sanitize(prompt))
-    url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model=flux"
-    )
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
-                resp = await client.get(url)
-                resp.raise_for_status()
-                if len(resp.content) < 1024:
-                    return None
-                output_path.write_bytes(resp.content)
-                return output_path
-        except (httpx.TimeoutException, httpx.NetworkError):
-            await asyncio.sleep(3 * (attempt + 1))
-        except httpx.HTTPStatusError:
-            if attempt < 1:
+    for model in _POLLINATIONS_MODELS:
+        url = (
+            f"https://image.pollinations.ai/prompt/{encoded}"
+            f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
+        )
+        for attempt in range(2):
+            try:
+                async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+                    resp = await client.get(url)
+                    resp.raise_for_status()
+                    if len(resp.content) < 1024:
+                        break  # bad response, try next model
+                    output_path.write_bytes(resp.content)
+                    return output_path
+            except (httpx.TimeoutException, httpx.NetworkError):
                 await asyncio.sleep(3 * (attempt + 1))
+            except httpx.HTTPStatusError:
+                if attempt < 1:
+                    await asyncio.sleep(3 * (attempt + 1))
     return None
 
 
@@ -161,12 +184,13 @@ async def generate_image(
     if providers is None:
         providers = ["pollinations", "huggingface"]
 
+    enriched = _enrich_prompt(prompt)
     for provider in providers:
         result = None
         if provider == "pollinations":
-            result = await _try_pollinations(prompt, output_path, seed)
+            result = await _try_pollinations(enriched, output_path, seed)
         elif provider == "huggingface":
-            result = await _try_huggingface(prompt, output_path)
+            result = await _try_huggingface(enriched, output_path)
         if result is not None:
             return result
 

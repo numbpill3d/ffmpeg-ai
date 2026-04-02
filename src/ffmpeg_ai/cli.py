@@ -48,7 +48,7 @@ def main(ctx: typer.Context):
     arg_table.add_column("description", style="white")
 
     arg_table.add_row("TOPIC",          "str",  "(required)", "Topic or idea for the Short")
-    arg_table.add_row("-o / --output",  "path", "output/short.mp4", "Output file path")
+    arg_table.add_row("-o / --output",  "path", "~/Videos/ffmpeg-ai/<timestamp>.mp4", "Output file path")
     arg_table.add_row("-d / --duration","int",  "45",         "Target duration in seconds (max 58)")
     arg_table.add_row("-m / --model",   "str",  "llama-3.3-70b:free", "OpenRouter model ID (see: ffmpeg-ai models)")
     arg_table.add_row("-v / --voice",   "str",  "en-female",  f"TTS voice key: {', '.join(VOICES.keys())}  (see: ffmpeg-ai voices)")
@@ -100,7 +100,7 @@ def main(ctx: typer.Context):
 @app.command()
 def generate(
     topic: str = typer.Argument(..., help="Topic or idea for the Short"),
-    output: Path = typer.Option(Path("output/short.mp4"), "-o", "--output", help="Output file path"),
+    output: Optional[Path] = typer.Option(None, "-o", "--output", help="Output file path (default: ~/Videos/ffmpeg-ai/<timestamp>.mp4)"),
     duration: int = typer.Option(45, "-d", "--duration", help="Target duration in seconds (max 58)"),
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model", help="OpenRouter model ID"),
     voice: str = typer.Option("en-female", "-v", "--voice", help=f"Voice: {', '.join(VOICES.keys())}"),
@@ -135,6 +135,11 @@ def generate(
             console.print(f"[bold red]✗[/] --images-dir not found: {images_dir}")
             raise typer.Exit(1)
         resolved_images_dir = images_dir
+
+    if output is None:
+        import datetime
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output = Path.home() / "Videos" / "ffmpeg-ai" / f"{ts}.mp4"
 
     if music is not None and not music.is_file():
         console.print(f"[bold red]✗[/] --music file not found: {music}")
