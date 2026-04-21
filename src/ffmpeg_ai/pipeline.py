@@ -1,9 +1,11 @@
 """Orchestrates the full Short generation pipeline."""
 import asyncio
+import math
 import random
 import shutil
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +21,7 @@ from .ai.tts import synthesize_segments, DEFAULT_VOICE
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
     merge_audio, mix_music, burn_captions, final_encode, get_audio_duration,
+    detect_beats, snap_to_beats,
     MOTION_STYLES,
 )
 from .video.captions import audio_to_ass
@@ -51,10 +54,11 @@ async def run_pipeline(
         tmp_dir = Path(tmp)
 
         # ── 1. Script ────────────────────────────────────────────────────────
+        n_images_target = max(12, int(duration / 2.2))
         print_stage("SCRIPT", f"model: {model.split('/')[1]}")
         with pipeline_progress("Generating script") as prog:
             task = prog.add_task("Asking AI...", total=1)
-            script = await generate_script(topic, duration=duration, model=model)
+            script = await generate_script(topic, duration=duration, model=model, n_images=n_images_target)
             prog.update(task, completed=1)
 
         console.print(Panel(
@@ -117,7 +121,7 @@ async def run_pipeline(
         elif use_ai_images:
             providers = image_providers or ["pollinations", "huggingface"]
             provider_label = " → ".join(providers)
-            print_stage("IMAGES", f"{n} frames  [{provider_label}]")
+            print_stage("IMAGES", f"{n} B-roll frames  [{provider_label}]")
             with pipeline_progress("Generating images") as prog:
                 task = prog.add_task("Generating...", total=n)
                 images = await generate_images(
@@ -137,27 +141,48 @@ async def run_pipeline(
             print_success(f"Created {len(images)} placeholder images")
 
         # ── 4. Video clips ───────────────────────────────────────────────────
-        print_stage("VIDEO", "image → video clips  [varied Ken Burns + xfade transitions]")
+        n = len(images)
+        clip_durations = _energy_curve_durations(n, total_dur)
+
+        # If music is present, detect beats and snap cut boundaries to them
+        if music_path is not None and music_path.is_file():
+            beats = detect_beats(music_path)
+            if beats:
+                cut_times: list[float] = []
+                t = 0.0
+                for d in clip_durations[:-1]:
+                    t += d
+                    cut_times.append(t)
+                snapped = snap_to_beats(cut_times, beats)
+                snapped_with_end = snapped + [total_dur]
+                new_durations = [snapped_with_end[0]]
+                for i in range(1, len(snapped_with_end)):
+                    new_durations.append(max(0.5, snapped_with_end[i] - snapped_with_end[i - 1]))
+                clip_durations = new_durations
+
+        motions = _pick_motions(n)
         clip_dir = tmp_dir / "clips"
         clip_dir.mkdir(parents=True, exist_ok=True)
-        per_img_dur = total_dur / len(images)
 
-        # Shuffle motion styles — no two adjacent clips use the same motion
-        motions = _pick_motions(len(images))
-
+        print_stage("VIDEO", f"{n} clips  [energy-curve cuts · color grade · zoom-punch transitions]")
+        clips_dict: dict[int, Path] = {}
         with pipeline_progress("Rendering clips") as prog:
-            task = prog.add_task("ffmpeg...", total=len(images))
-            clips = []
-            clip_durations = []
-            for i, img in enumerate(images):
-                clip = image_to_video(
-                    img, per_img_dur,
-                    clip_dir / f"clip_{i:03d}.mp4",
-                    motion=motions[i],
+            task = prog.add_task("ffmpeg...", total=n)
+
+            def _render_clip(idx: int) -> tuple[int, Path]:
+                path = image_to_video(
+                    images[idx], clip_durations[idx],
+                    clip_dir / f"clip_{idx:03d}.mp4",
+                    motion=motions[idx],
                 )
-                clips.append(clip)
-                clip_durations.append(per_img_dur)
                 prog.advance(task)
+                return idx, path
+
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for idx, path in ex.map(_render_clip, range(n)):
+                    clips_dict[idx] = path
+
+        clips = [clips_dict[i] for i in range(n)]
 
         raw_video = tmp_dir / "raw.mp4"
         concat_with_transitions(clips, clip_durations, raw_video)
@@ -226,3 +251,25 @@ def _pick_motions(n: int) -> list[str]:
         remaining = [s for s in styles if s != result[-1]]
         result.append(random.choice(remaining))
     return result
+
+
+def _energy_curve_durations(n: int, total_dur: float) -> list[float]:
+    """TikTok energy curve: fast at hook and outro, slower in the body.
+
+    Uses a sine arc so the middle clips breathe while start/end punch hard.
+    All durations are floored at 1.2s and normalised to sum exactly to total_dur.
+    """
+    if n == 0:
+        return []
+    base = total_dur / n
+    raw: list[float] = []
+    for i in range(n):
+        pos = i / max(n - 1, 1)
+        # sin arc: 0 at edges → 1 at centre; map to duration multiplier [0.65, 1.20]
+        arc = math.sin(math.pi * pos)
+        factor = 0.65 + arc * 0.55
+        jitter = random.uniform(0.90, 1.10)
+        raw.append(max(1.2, base * factor * jitter))
+    # Normalise so clips exactly fill the narration
+    scale = total_dur / sum(raw)
+    return [d * scale for d in raw]

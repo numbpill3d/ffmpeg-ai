@@ -5,6 +5,9 @@ import subprocess
 from pathlib import Path
 from .shorts import WIDTH, HEIGHT, FPS, SHORTS_VIDEO_ARGS
 
+# Color grade applied to every clip: warm contrast lift + saturation boost + vignette
+_COLOR_GRADE = "eq=contrast=1.12:saturation=1.4:brightness=0.015,vignette=PI/5"
+
 
 def _run(cmd: list[str], label: str = "ffmpeg"):
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -34,16 +37,23 @@ MOTION_STYLES = [
 
 
 def _kenburns_filter(motion: str, duration: float) -> str:
-    """Return a zoompan filter string for the given motion style."""
+    """Return a zoompan filter string for the given motion style.
+
+    Zoom step is scaled to duration so short clips (1.5s) travel the same
+    visual distance as long ones — motion always feels intentional.
+    """
     d = int(duration * FPS)
+    # Scale step so zoom travels full 0.2 range regardless of clip length
+    step = 0.2 / max(d, 1)
+    step6 = f"{step:.6f}"
     if motion == "zoom_in":
         return (
-            f"zoompan=z='min(zoom+0.0008,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
         )
     if motion == "zoom_out":
         return (
-            f"zoompan=z='if(eq(on,1),1.2,max(zoom-0.0008,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f"zoompan=z='if(eq(on,1),1.2,max(zoom-{step6},1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
         )
     if motion == "pan_right":
@@ -77,13 +87,14 @@ def _kenburns_filter(motion: str, duration: float) -> str:
             f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
         )
     if motion == "subtle_zoom":
+        step_subtle = f"{0.08 / max(d, 1):.6f}"
         return (
-            f"zoompan=z='min(zoom+0.0004,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f"zoompan=z='min(zoom+{step_subtle},1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
         )
     # fallback
     return (
-        f"zoompan=z='min(zoom+0.0008,1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
         f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
     )
 
@@ -94,12 +105,13 @@ def image_to_video(
     output_path: Path,
     motion: str = "zoom_in",
 ) -> Path:
-    """Convert a static image to a video clip with Ken Burns motion effect."""
+    """Convert a static image to a video clip with Ken Burns motion + color grade."""
     zoom_filter = _kenburns_filter(motion, duration)
+    vf = f"{zoom_filter},{_COLOR_GRADE}"
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(image_path),
-        "-vf", zoom_filter,
+        "-vf", vf,
         "-t", str(duration),
         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
         "-pix_fmt", "yuv420p",
@@ -111,10 +123,15 @@ def image_to_video(
 
 # ── Concat ────────────────────────────────────────────────────────────────────
 
+# zoomin weighted 4x — it's the TikTok zoom-punch feel
 _TRANSITION_TYPES = [
-    "fade", "fadeblack", "fadewhite",
-    "wipeleft", "wiperight", "wipeup", "wipedown",
-    "slideleft", "slideright", "slideup", "slidedown",
+    "zoomin", "zoomin", "zoomin", "zoomin",
+    "fadeblack", "fadeblack",
+    "wipeleft", "wiperight",
+    "slideleft", "slideright",
+    "squeezeh", "squeezev",
+    "diagtl", "diagtr",
+    "fade",
 ]
 
 
@@ -122,12 +139,16 @@ def concat_with_transitions(
     video_paths: list[Path],
     durations: list[float],
     output_path: Path,
-    transition_duration: float = 0.5,
+    transition_duration: float | None = None,
 ) -> Path:
     """Concatenate video clips with random xfade transitions between each pair."""
     if len(video_paths) == 1:
         shutil.copy2(video_paths[0], output_path)
         return output_path
+
+    # Adaptive transition: cap at 25% of the shortest clip, never above 0.4s
+    if transition_duration is None:
+        transition_duration = min(0.4, min(durations) * 0.25)
 
     n = len(video_paths)
     inputs: list[str] = []
@@ -280,3 +301,61 @@ def final_encode(video_path: Path, output_path: Path) -> Path:
     ]
     _run(cmd, "final_encode")
     return output_path
+
+
+# ── Beat detection ────────────────────────────────────────────────────────────
+
+def detect_beats(audio_path: Path, min_interval: float = 0.25) -> list[float]:
+    """Return beat timestamps from an audio file using ffmpeg + numpy RMS peak detection."""
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+
+    cmd = ["ffmpeg", "-i", str(audio_path), "-f", "f32le", "-ar", "22050", "-ac", "1", "-"]
+    result = subprocess.run(cmd, capture_output=True)
+    if not result.stdout:
+        return []
+
+    samples = np.frombuffer(result.stdout, dtype=np.float32)
+    sr = 22050
+    hop = sr // 10  # 0.1s windows
+    n_frames = (len(samples) - hop) // hop
+    if n_frames < 3:
+        return []
+
+    rms = np.array([
+        np.sqrt(np.mean(samples[i * hop:(i + 1) * hop] ** 2))
+        for i in range(n_frames)
+    ])
+
+    threshold = np.mean(rms) + 0.5 * np.std(rms)
+    beats: list[float] = []
+    for i in range(1, len(rms) - 1):
+        if rms[i] > threshold and rms[i] >= rms[i - 1] and rms[i] >= rms[i + 1]:
+            beats.append(i * 0.1)
+
+    # Enforce minimum interval between beats
+    filtered: list[float] = []
+    last = -float("inf")
+    for b in beats:
+        if b - last >= min_interval:
+            filtered.append(b)
+            last = b
+    return filtered
+
+
+def snap_to_beats(cut_times: list[float], beats: list[float], tolerance: float = 0.25) -> list[float]:
+    """Snap each cut time to the nearest beat within tolerance (no two cuts share a beat)."""
+    if not beats:
+        return cut_times
+    used: set[int] = set()
+    result: list[float] = []
+    for t in cut_times:
+        best_idx = min(range(len(beats)), key=lambda i: abs(beats[i] - t))
+        if abs(beats[best_idx] - t) <= tolerance and best_idx not in used:
+            used.add(best_idx)
+            result.append(beats[best_idx])
+        else:
+            result.append(t)
+    return result

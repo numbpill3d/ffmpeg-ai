@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pillow>=10.0",           # image handling before ffmpeg ingestion
     "faster-whisper>=1.0",    # local transcription for captions
+    "numpy>=1.24",             # beat detection for music sync
 ]
 
 [project.optional-dependencies]
