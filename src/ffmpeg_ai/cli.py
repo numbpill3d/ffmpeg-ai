@@ -1,5 +1,7 @@
 """CLI entry point."""
 import asyncio
+import os
+import re
 from pathlib import Path
 from typing import Optional
 import typer
@@ -9,7 +11,7 @@ from rich.panel import Panel
 from rich import box
 
 from .ui.display import print_banner, console
-from .ai.openrouter import FREE_MODELS
+from .ai.openrouter import FREE_MODELS, STYLE_PRESETS
 from .ai.tts import VOICES
 from .ai.images import USER_IMAGES_DIR
 
@@ -21,6 +23,9 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
+_STYLE_CHOICES    = list(STYLE_PRESETS.keys())
+_CAPTION_CHOICES  = ["karaoke", "plain", "bold-center"]
+
 
 @app.callback()
 def main(ctx: typer.Context):
@@ -30,120 +35,118 @@ def main(ctx: typer.Context):
 
     print_banner()
 
-    # ── subcommands ──────────────────────────────────────────────────────────
     cmd_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
-    cmd_table.add_column("cmd", style="bold cyan", no_wrap=True)
+    cmd_table.add_column("cmd",  style="bold cyan", no_wrap=True)
     cmd_table.add_column("desc", style="white")
     cmd_table.add_row("generate", "generate a YouTube Short from a topic  [dim](main command)[/]")
+    cmd_table.add_row("batch",    "generate multiple Shorts from a topics file")
     cmd_table.add_row("models",   "list available free OpenRouter models")
     cmd_table.add_row("voices",   "list available TTS voices")
     cmd_table.add_row("providers","list image generation providers + auth status")
     console.print(Panel(cmd_table, title="[bold white]commands[/]", border_style="bright_black", box=box.ROUNDED))
 
-    # ── generate arguments ───────────────────────────────────────────────────
     arg_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=True, padding=(0, 2))
-    arg_table.add_column("argument",  style="bold cyan",  no_wrap=True)
-    arg_table.add_column("type",      style="dim white",  no_wrap=True)
-    arg_table.add_column("default",   style="yellow",     no_wrap=True)
+    arg_table.add_column("argument",    style="bold cyan",  no_wrap=True)
+    arg_table.add_column("type",        style="dim white",  no_wrap=True)
+    arg_table.add_column("default",     style="yellow",     no_wrap=True)
     arg_table.add_column("description", style="white")
 
-    arg_table.add_row("TOPIC",          "str",  "(required)", "Topic or idea for the Short")
-    arg_table.add_row("-o / --output",  "path", "~/Videos/ffmpeg-ai/<timestamp>.mp4", "Output file path")
-    arg_table.add_row("-d / --duration","int",  "45",         "Target duration in seconds (max 58)")
-    arg_table.add_row("-m / --model",   "str",  "llama-3.3-70b:free", "OpenRouter model ID (see: ffmpeg-ai models)")
-    arg_table.add_row("-v / --voice",   "str",  "en-female",  f"TTS voice key: {', '.join(VOICES.keys())}  (see: ffmpeg-ai voices)")
-    arg_table.add_row("-M / --music",   "path", "none",       "Background music file (MP3/WAV) — auto-ducked under narration")
-    arg_table.add_row("-I / --images-dir","path","none",      "Use images from this directory instead of AI generation")
-    arg_table.add_row("--no-ai-images", "flag", "off",        "Disable AI image generation (use PIL placeholders or --images-dir)")
-    arg_table.add_row("--providers",    "str",  "pollinations,huggingface", "Comma-separated image provider order")
-    arg_table.add_row("--dry-run",      "flag", "off",        "Generate script only — no video rendered")
+    arg_table.add_row("TOPIC",               "str",  "(required)", "Topic or idea for the Short")
+    arg_table.add_row("-o / --output",        "path", "~/Videos/ffmpeg-ai/<ts>.mp4", "Output file path")
+    arg_table.add_row("-d / --duration",      "int",  "45",         "Target duration in seconds (max 58)")
+    arg_table.add_row("-m / --model",         "str",  "llama-3.3-70b:free", "OpenRouter model ID")
+    arg_table.add_row("-v / --voice",         "str",  "en-female",  f"TTS voice: {', '.join(VOICES.keys())}")
+    arg_table.add_row("-M / --music",         "path", "none",       "Background music (MP3/WAV), auto-ducked")
+    arg_table.add_row("-I / --images-dir",    "path", "none",       "Use images from this directory")
+    arg_table.add_row("--script",             "path", "none",       "Load script JSON from file (skips LLM)")
+    arg_table.add_row("--edit-script",        "flag", "off",        "Open generated script in $EDITOR before rendering")
+    arg_table.add_row("--style",              "str",  "none",       f"Tone preset: {', '.join(_STYLE_CHOICES)}")
+    arg_table.add_row("--caption-style",      "str",  "karaoke",    f"Caption style: {', '.join(_CAPTION_CHOICES)}")
+    arg_table.add_row("--providers",          "str",  "pollinations,huggingface", "Image provider order")
+    arg_table.add_row("--no-ai-images",       "flag", "off",        "Disable AI image generation")
+    arg_table.add_row("--thumbnail/--no-thumbnail", "flag", "on",  "Extract thumbnail JPEG alongside output")
+    arg_table.add_row("--fresh",              "flag", "off",        "Ignore cached job data, start from scratch")
+    arg_table.add_row("-q / --quiet",         "flag", "off",        "Minimal output — one line per stage")
+    arg_table.add_row("--dry-run",            "flag", "off",        "Generate script only, no video rendered")
     console.print(Panel(arg_table, title="[bold white]generate — arguments[/]", border_style="bright_black", box=box.ROUNDED))
 
-    # ── examples ─────────────────────────────────────────────────────────────
     ex_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
-    ex_table.add_column("label", style="dim white",  no_wrap=True, min_width=20)
+    ex_table.add_column("label", style="dim white",  no_wrap=True, min_width=22)
     ex_table.add_column("cmd",   style="bold green")
 
-    ex_table.add_row("basic",
-        'ffmpeg-ai generate "5 facts about black holes"')
-    ex_table.add_row("custom output",
-        'ffmpeg-ai generate "stoic morning routine" -o ~/Videos/stoic.mp4')
-    ex_table.add_row("longer short",
-        'ffmpeg-ai generate "how GPUs work" -d 58')
-    ex_table.add_row("different voice",
-        'ffmpeg-ai generate "ancient rome" -v en-male')
-    ex_table.add_row("different model",
-        f'ffmpeg-ai generate "dark matter" -m {FREE_MODELS[2]}')
-    ex_table.add_row("add background music",
-        'ffmpeg-ai generate "lofi study tips" -M assets/music/lofi.mp3')
-    ex_table.add_row("your own images",
-        'ffmpeg-ai generate "my travel vlog" -I ~/Pictures/trip/')
-    ex_table.add_row("no AI images",
-        'ffmpeg-ai generate "test topic" --no-ai-images -o test.mp4')
-    ex_table.add_row("huggingface images only",
-        'ffmpeg-ai generate "cyberpunk city" --providers huggingface')
-    ex_table.add_row("script preview only",
-        'ffmpeg-ai generate "mars colonization" --dry-run')
-    ex_table.add_row("full custom",
-        f'ffmpeg-ai generate "quantum computing" -d 50 -v en-news -m {FREE_MODELS[1]} -o out/quantum.mp4')
+    ex_table.add_row("basic",              'ffmpeg-ai generate "5 facts about black holes"')
+    ex_table.add_row("dramatic style",     'ffmpeg-ai generate "deep sea creatures" --style dramatic')
+    ex_table.add_row("listicle",           'ffmpeg-ai generate "productivity hacks" --style listicle')
+    ex_table.add_row("edit before render", 'ffmpeg-ai generate "mars colonization" --edit-script')
+    ex_table.add_row("resume job",         'ffmpeg-ai generate "ancient rome"  [dim](re-uses cached images/audio)[/]')
+    ex_table.add_row("fresh run",          'ffmpeg-ai generate "ancient rome" --fresh')
+    ex_table.add_row("load saved script",  'ffmpeg-ai generate "ancient rome" --script ~/.cache/ffmpeg-ai/jobs/ancient-rome/script.json')
+    ex_table.add_row("plain captions",     'ffmpeg-ai generate "stoic tips" --caption-style plain')
+    ex_table.add_row("no thumbnail",       'ffmpeg-ai generate "test" --no-thumbnail -o test.mp4')
+    ex_table.add_row("quiet batch-friendly",'ffmpeg-ai generate "quantum computing" -q -o out/q.mp4')
+    ex_table.add_row("batch",              'ffmpeg-ai batch topics.txt -o ~/Videos/batch/')
     console.print(Panel(ex_table, title="[bold white]examples[/]", border_style="bright_black", box=box.ROUNDED))
 
-    # ── env vars ─────────────────────────────────────────────────────────────
     env_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
-    env_table.add_column("var",   style="bold cyan",  no_wrap=True)
-    env_table.add_column("desc",  style="white")
-    env_table.add_row("OPENROUTER_API_KEY", "required for LLM script generation  [dim](free tier, no credit card)[/]")
+    env_table.add_column("var",  style="bold cyan", no_wrap=True)
+    env_table.add_column("desc", style="white")
+    env_table.add_row("OPENROUTER_API_KEY", "required for LLM script generation  [dim](free tier)[/]")
     env_table.add_row("HF_TOKEN",           "optional — enables HuggingFace image provider")
+    env_table.add_row("EDITOR",             "editor for --edit-script  [dim](default: nano)[/]")
     console.print(Panel(env_table, title="[bold white]env vars  (.env supported)[/]", border_style="bright_black", box=box.ROUNDED))
 
 
 @app.command()
 def generate(
     topic: str = typer.Argument(..., help="Topic or idea for the Short"),
-    output: Optional[Path] = typer.Option(None, "-o", "--output", help="Output file path (default: ~/Videos/ffmpeg-ai/<timestamp>.mp4)"),
-    duration: int = typer.Option(45, "-d", "--duration", help="Target duration in seconds (max 58)"),
-    model: str = typer.Option(FREE_MODELS[0], "-m", "--model", help="OpenRouter model ID"),
-    voice: str = typer.Option("en-female", "-v", "--voice", help=f"Voice: {', '.join(VOICES.keys())}"),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Generate script only, no video"),
-    images_dir: Optional[Path] = typer.Option(
-        None, "--images-dir", "-I",
-        help=f"Use images from this directory instead of AI generation. "
-             f"Default user folder: {USER_IMAGES_DIR}",
-    ),
-    no_ai_images: bool = typer.Option(
-        False, "--no-ai-images",
-        help="Disable AI image generation (use PIL placeholders unless --images-dir is set)",
-    ),
-    providers: Optional[str] = typer.Option(
-        None, "--providers",
-        help='Comma-separated AI image provider order. Available: "pollinations,huggingface". '
-             'Default: "pollinations,huggingface"',
-    ),
-    music: Optional[Path] = typer.Option(
-        None, "--music", "-M",
-        help="Background music file (MP3/WAV). Auto-ducked under narration. "
-             "Drop tracks in assets/music/ and pass one here.",
-    ),
+    output: Optional[Path] = typer.Option(None, "-o", "--output"),
+    duration: int = typer.Option(45, "-d", "--duration"),
+    model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
+    voice: str = typer.Option("en-female", "-v", "--voice"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    images_dir: Optional[Path] = typer.Option(None, "--images-dir", "-I"),
+    no_ai_images: bool = typer.Option(False, "--no-ai-images"),
+    providers: Optional[str] = typer.Option(None, "--providers"),
+    music: Optional[Path] = typer.Option(None, "--music", "-M"),
+    script: Optional[Path] = typer.Option(None, "--script", help="Load script JSON from file (skips LLM)"),
+    edit_script: bool = typer.Option(False, "--edit-script", help="Open script in $EDITOR before rendering"),
+    fresh: bool = typer.Option(False, "--fresh", help="Ignore cached job data and start from scratch"),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Minimal output"),
+    thumbnail: bool = typer.Option(True, "--thumbnail/--no-thumbnail", help="Extract thumbnail alongside output"),
+    style: Optional[str] = typer.Option(None, "--style", help=f"Tone preset: {', '.join(_STYLE_CHOICES)}"),
+    caption_style: str = typer.Option("karaoke", "--caption-style", help=f"Caption style: {', '.join(_CAPTION_CHOICES)}"),
 ):
     """[bold cyan]Generate a YouTube Short from a topic.[/]"""
     print_banner()
 
-    # Resolve images_dir
-    resolved_images_dir: Optional[Path] = None
-    if images_dir is not None:
-        if not images_dir.is_dir():
-            console.print(f"[bold red]✗[/] --images-dir not found: {images_dir}")
-            raise typer.Exit(1)
-        resolved_images_dir = images_dir
+    if not os.environ.get("OPENROUTER_API_KEY", "") and script is None:
+        console.print("[bold red]error:[/] OPENROUTER_API_KEY not set — add it to .env or export it")
+        raise typer.Exit(1)
+
+    if style and style not in _STYLE_CHOICES:
+        console.print(f"[bold red]error:[/] unknown style '{style}'. choices: {', '.join(_STYLE_CHOICES)}")
+        raise typer.Exit(1)
+
+    if caption_style not in _CAPTION_CHOICES:
+        console.print(f"[bold red]error:[/] unknown caption-style '{caption_style}'. choices: {', '.join(_CAPTION_CHOICES)}")
+        raise typer.Exit(1)
+
+    if images_dir is not None and not images_dir.is_dir():
+        console.print(f"[bold red]✗[/] --images-dir not found: {images_dir}")
+        raise typer.Exit(1)
+
+    if script is not None and not script.is_file():
+        console.print(f"[bold red]✗[/] --script file not found: {script}")
+        raise typer.Exit(1)
+
+    if music is not None and not music.is_file():
+        console.print(f"[bold red]✗[/] --music file not found: {music}")
+        raise typer.Exit(1)
 
     if output is None:
         import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         output = Path.home() / "Videos" / "ffmpeg-ai" / f"{ts}.mp4"
-
-    if music is not None and not music.is_file():
-        console.print(f"[bold red]✗[/] --music file not found: {music}")
-        raise typer.Exit(1)
 
     provider_list = [p.strip() for p in providers.split(",")] if providers else None
 
@@ -156,18 +159,92 @@ def generate(
         model=model,
         voice=selected_voice,
         dry_run=dry_run,
-        images_dir=resolved_images_dir,
+        images_dir=images_dir,
         use_ai_images=not no_ai_images,
         image_providers=provider_list,
         music_path=music,
+        script_path=script,
+        edit_script=edit_script,
+        fresh=fresh,
+        quiet=quiet,
+        thumbnail=thumbnail,
+        style=style,
+        caption_style=caption_style,
     ))
+
+
+@app.command()
+def batch(
+    topics_file: Path = typer.Argument(..., help="Text file with one topic per line (# lines are comments)"),
+    output_dir: Optional[Path] = typer.Option(None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"),
+    duration: int = typer.Option(45, "-d", "--duration"),
+    model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
+    voice: str = typer.Option("en-female", "-v", "--voice"),
+    style: Optional[str] = typer.Option(None, "--style"),
+    caption_style: str = typer.Option("karaoke", "--caption-style"),
+    thumbnail: bool = typer.Option(True, "--thumbnail/--no-thumbnail"),
+    fresh: bool = typer.Option(False, "--fresh"),
+    quiet: bool = typer.Option(False, "-q", "--quiet"),
+):
+    """[bold cyan]Generate multiple Shorts from a file of topics (one per line).[/]"""
+    if not os.environ.get("OPENROUTER_API_KEY", ""):
+        console.print("[bold red]error:[/] OPENROUTER_API_KEY not set")
+        raise typer.Exit(1)
+
+    if not topics_file.is_file():
+        console.print(f"[bold red]✗[/] file not found: {topics_file}")
+        raise typer.Exit(1)
+
+    topics = [
+        line.strip()
+        for line in topics_file.read_text().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
+    if not topics:
+        console.print("[bold red]✗[/] no topics found in file")
+        raise typer.Exit(1)
+
+    out_dir = output_dir or (Path.home() / "Videos" / "ffmpeg-ai")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    from .pipeline import run_pipeline
+    selected_voice = VOICES.get(voice, voice)
+
+    console.print(f"[bold cyan]batch:[/] {len(topics)} topics → {out_dir}")
+
+    failed = 0
+    for i, topic in enumerate(topics, 1):
+        console.print(f"\n[bold cyan]── {i}/{len(topics)}: {topic} ──[/]")
+        import datetime
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
+        out  = out_dir / f"{ts}_{slug}.mp4"
+        try:
+            asyncio.run(run_pipeline(
+                topic=topic,
+                output_path=out,
+                duration=min(duration, 58),
+                model=model,
+                voice=selected_voice,
+                style=style,
+                caption_style=caption_style,
+                thumbnail=thumbnail,
+                fresh=fresh,
+                quiet=quiet,
+            ))
+        except Exception as e:
+            console.print(f"[bold red]✗[/] topic {i} failed: {e}")
+            failed += 1
+            continue
+
+    status = "[bold green]done[/]" if failed == 0 else f"[bold yellow]done ({failed} failed)[/]"
+    console.print(f"\n{status} — {len(topics)} topics processed")
 
 
 @app.command()
 def models():
     """[dim]List available free OpenRouter models.[/]"""
-    from rich.table import Table
-    from rich import box
     t = Table(box=box.SIMPLE, border_style="cyan", show_header=True)
     t.add_column("Model", style="cyan")
     for m in FREE_MODELS:
@@ -178,10 +255,8 @@ def models():
 @app.command()
 def voices():
     """[dim]List available TTS voices.[/]"""
-    from rich.table import Table
-    from rich import box
     t = Table(box=box.SIMPLE, border_style="cyan")
-    t.add_column("Key", style="cyan")
+    t.add_column("Key",      style="cyan")
     t.add_column("Voice ID", style="white")
     for k, v in VOICES.items():
         t.add_row(k, v)
@@ -191,20 +266,13 @@ def voices():
 @app.command()
 def providers():
     """[dim]List available image generation providers.[/]"""
-    import os
-    from rich.table import Table
-    from rich import box
     t = Table(box=box.SIMPLE, border_style="cyan")
-    t.add_column("Provider", style="cyan")
+    t.add_column("Provider",      style="cyan")
     t.add_column("Auth required", style="white")
-    t.add_column("Status", style="white")
+    t.add_column("Status",        style="white")
     hf_key = os.environ.get("HF_TOKEN", "")
-    t.add_row("pollinations", "none", "[green]ready[/]")
-    t.add_row(
-        "huggingface",
-        "HF_TOKEN",
-        "[green]ready[/]" if hf_key else "[dim]set HF_TOKEN to enable[/]",
-    )
+    t.add_row("pollinations", "none",     "[green]ready[/]")
+    t.add_row("huggingface",  "HF_TOKEN", "[green]ready[/]" if hf_key else "[dim]set HF_TOKEN to enable[/]")
     console.print(t)
 
 

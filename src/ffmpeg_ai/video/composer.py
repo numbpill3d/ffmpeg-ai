@@ -8,6 +8,10 @@ from .shorts import WIDTH, HEIGHT, FPS, SHORTS_VIDEO_ARGS
 # Color grade applied to every clip: warm contrast lift + saturation boost + vignette
 _COLOR_GRADE = "eq=contrast=1.12:saturation=1.4:brightness=0.015,vignette=PI/5"
 
+# zoompan runs at this resolution then scales up — ~3x faster than full 1080x1920
+_WORK_W = 720
+_WORK_H = 1280
+
 
 def _run(cmd: list[str], label: str = "ffmpeg"):
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -36,7 +40,7 @@ MOTION_STYLES = [
 ]
 
 
-def _kenburns_filter(motion: str, duration: float) -> str:
+def _kenburns_filter(motion: str, duration: float, w: int = WIDTH, h: int = HEIGHT) -> str:
     """Return a zoompan filter string for the given motion style.
 
     Zoom step is scaled to duration so short clips (1.5s) travel the same
@@ -49,53 +53,53 @@ def _kenburns_filter(motion: str, duration: float) -> str:
     if motion == "zoom_in":
         return (
             f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "zoom_out":
         return (
             f"zoompan=z='if(eq(on,1),1.2,max(zoom-{step6},1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "pan_right":
         return (
             f"zoompan=z=1.2:x='iw*(1-1/zoom)*on/{d}':y='ih*(1-1/zoom)/2'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "pan_left":
         return (
             f"zoompan=z=1.2:x='iw*(1-1/zoom)*(1-on/{d})':y='ih*(1-1/zoom)/2'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "pan_up":
         return (
             f"zoompan=z=1.2:x='iw*(1-1/zoom)/2':y='ih*(1-1/zoom)*(1-on/{d})'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "pan_down":
         return (
             f"zoompan=z=1.2:x='iw*(1-1/zoom)/2':y='ih*(1-1/zoom)*on/{d}'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "diagonal_tr":
         return (
             f"zoompan=z=1.25:x='iw*(1-1/zoom)*on/{d}':y='ih*(1-1/zoom)*(1-on/{d})'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "diagonal_bl":
         return (
             f"zoompan=z=1.25:x='iw*(1-1/zoom)*(1-on/{d})':y='ih*(1-1/zoom)*on/{d}'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     if motion == "subtle_zoom":
         step_subtle = f"{0.08 / max(d, 1):.6f}"
         return (
             f"zoompan=z='min(zoom+{step_subtle},1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-            f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+            f":d={d}:s={w}x{h}:fps={FPS}"
         )
     # fallback
     return (
         f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-        f":d={d}:s={WIDTH}x{HEIGHT}:fps={FPS}"
+        f":d={d}:s={w}x{h}:fps={FPS}"
     )
 
 
@@ -106,8 +110,8 @@ def image_to_video(
     motion: str = "zoom_in",
 ) -> Path:
     """Convert a static image to a video clip with Ken Burns motion + color grade."""
-    zoom_filter = _kenburns_filter(motion, duration)
-    vf = f"{zoom_filter},{_COLOR_GRADE}"
+    zoom_filter = _kenburns_filter(motion, duration, w=_WORK_W, h=_WORK_H)
+    vf = f"scale={_WORK_W}:{_WORK_H},{zoom_filter},{_COLOR_GRADE},scale={WIDTH}:{HEIGHT}"
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(image_path),
@@ -359,3 +363,20 @@ def snap_to_beats(cut_times: list[float], beats: list[float], tolerance: float =
         else:
             result.append(t)
     return result
+
+
+def extract_thumbnail(video_path: Path, output_path: Path, position_pct: float = 0.25) -> Path:
+    """Extract a frame at position_pct (0–1) into the video as a JPEG thumbnail."""
+    dur_cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
+    ]
+    result = subprocess.run(dur_cmd, capture_output=True, text=True)
+    duration = float(result.stdout.strip())
+    ts = duration * position_pct
+    cmd = [
+        "ffmpeg", "-y", "-ss", str(ts), "-i", str(video_path),
+        "-vframes", "1", "-q:v", "2", str(output_path),
+    ]
+    _run(cmd, "extract_thumbnail")
+    return output_path

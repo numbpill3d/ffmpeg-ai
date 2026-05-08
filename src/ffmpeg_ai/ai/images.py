@@ -2,9 +2,9 @@
 import asyncio
 import os
 import random
-import unicodedata
 import urllib.parse
 from pathlib import Path
+from typing import Callable, Optional
 import httpx
 
 # Cinematic style suffixes appended to AI image prompts
@@ -44,11 +44,6 @@ def load_user_images(images_dir: Path, count: int) -> list[Path]:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _sanitize(prompt: str) -> str:
-    normalized = unicodedata.normalize("NFKD", prompt)
-    return "".join(c if ord(c) < 128 else "-" for c in normalized)
-
 
 def _make_placeholder(prompt: str, output_path: Path) -> Path:
     """Dark gradient placeholder via Pillow — last resort when all providers fail."""
@@ -100,26 +95,27 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
     """Returns path on success, None on failure (don't raise).
     Tries flux-realism first (better quality), falls back to flux.
     """
-    encoded = urllib.parse.quote(_sanitize(prompt))
+    encoded = urllib.parse.quote(prompt, safe="")
     for model in _POLLINATIONS_MODELS:
         url = (
             f"https://image.pollinations.ai/prompt/{encoded}"
             f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
         )
-        for attempt in range(2):
+        for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
                     resp = await client.get(url)
                     resp.raise_for_status()
-                    if len(resp.content) < 1024:
-                        break  # bad response, try next model
+                    ct = resp.headers.get("content-type", "")
+                    if not ct.startswith("image/") or len(resp.content) < 1024:
+                        break  # not an image or too small — try next model
                     output_path.write_bytes(resp.content)
                     return output_path
             except (httpx.TimeoutException, httpx.NetworkError):
-                await asyncio.sleep(3 * (attempt + 1))
+                await asyncio.sleep(5 * (attempt + 1))
             except httpx.HTTPStatusError:
-                if attempt < 1:
-                    await asyncio.sleep(3 * (attempt + 1))
+                if attempt < 2:
+                    await asyncio.sleep(5 * (attempt + 1))
     return None
 
 
@@ -175,9 +171,10 @@ async def generate_image(
     output_path: Path,
     seed: int = 42,
     providers: list[str] | None = None,
-) -> Path:
+) -> tuple[Path, bool]:
     """Generate one image, trying providers in order, placeholder as last resort.
 
+    Returns (path, is_placeholder). is_placeholder=True means all providers failed.
     providers: list of provider names to try, in order. Defaults to all available.
     Available: "pollinations", "huggingface"
     """
@@ -192,31 +189,37 @@ async def generate_image(
         elif provider == "huggingface":
             result = await _try_huggingface(enriched, output_path)
         if result is not None:
-            return result
+            return result, False
 
-    return _make_placeholder(prompt, output_path)
+    return _make_placeholder(prompt, output_path), True
 
 
 async def generate_images(
     prompts: list[str],
     out_dir: Path,
-    progress=None,
-    task_id=None,
     providers: list[str] | None = None,
-    max_concurrent: int = 3,
-) -> list[Path]:
-    """Generate images for all prompts in parallel (up to max_concurrent at once)."""
+    max_concurrent: int = 2,
+    on_image_done: Optional[Callable[[int, bool], None]] = None,
+) -> tuple[list[Path], int]:
+    """Generate images for all prompts in parallel (up to max_concurrent at once).
+
+    Returns (paths, placeholder_count). placeholder_count > 0 means some providers failed.
+    on_image_done(index, is_placeholder) is called as each image completes.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(max_concurrent)
 
-    async def _gen(i: int, prompt: str) -> Path:
+    async def _gen(i: int, prompt: str) -> tuple[Path, bool]:
         async with sem:
-            result = await generate_image(
+            path, is_placeholder = await generate_image(
                 prompt, out_dir / f"frame_{i:03d}.jpg", seed=i * 7, providers=providers
             )
-            if progress is not None and task_id is not None:
-                progress.advance(task_id)
-            return result
+            if on_image_done is not None:
+                on_image_done(i, is_placeholder)
+            return path, is_placeholder
 
     tasks = [_gen(i, prompt) for i, prompt in enumerate(prompts)]
-    return list(await asyncio.gather(*tasks))
+    results = await asyncio.gather(*tasks)
+    paths = [path for path, _ in results]
+    placeholder_count = sum(1 for _, is_pl in results if is_pl)
+    return paths, placeholder_count
