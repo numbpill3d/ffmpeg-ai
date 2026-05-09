@@ -143,7 +143,7 @@ async def run_pipeline(
         segments = script["segments"]
         image_prompts = script.get("image_prompts", [s.get("visual", topic) for s in segments])
         n = len(image_prompts)
-        providers = image_providers or ["pollinations", "huggingface"]
+        providers = image_providers or ["bfl", "fal", "pollinations", "huggingface"]
 
         # ── 2+3. TTS + Images (parallel) ─────────────────────────────────────
         tts_dir        = job_dir / "tts"

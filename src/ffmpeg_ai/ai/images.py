@@ -101,10 +101,14 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
             f"https://image.pollinations.ai/prompt/{encoded}"
             f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
         )
-        for attempt in range(3):
+        for attempt in range(4):  # Increased attempts
             try:
-                async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
                     resp = await client.get(url)
+                    if resp.status_code == 429:
+                        # Heavy backoff for rate limits
+                        await asyncio.sleep(10 * (attempt + 1) + random.uniform(1, 5))
+                        continue
                     resp.raise_for_status()
                     ct = resp.headers.get("content-type", "")
                     if not ct.startswith("image/") or len(resp.content) < 1024:
@@ -114,7 +118,7 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
             except (httpx.TimeoutException, httpx.NetworkError):
                 await asyncio.sleep(5 * (attempt + 1))
             except httpx.HTTPStatusError:
-                if attempt < 2:
+                if attempt < 3:
                     await asyncio.sleep(5 * (attempt + 1))
     return None
 
@@ -164,6 +168,107 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
     return None
 
 
+# ── Provider: Black Forest Labs (Flux API) ───────────────────────────────────
+
+async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
+    """Returns path on success, None if no BFL_API_KEY or error.
+    Uses FLUX 1.1 [pro] with asynchronous polling.
+    """
+    key = os.environ.get("BFL_API_KEY", "")
+    if not key:
+        return None
+
+    headers = {"x-key": key, "Content-Type": "application/json"}
+    payload = {
+        "prompt": prompt,
+        "width": IMG_WIDTH,
+        "height": IMG_HEIGHT,
+        "seed": seed,
+        "prompt_upsampling": False,
+        "safety_tolerance": 3,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 1. Submit task
+            resp = await client.post("https://api.bfl.ai/v1/flux-pro-1.1", json=payload, headers=headers)
+            if resp.status_code != 200:
+                return None
+            task_id = resp.json().get("id")
+            if not task_id:
+                return None
+
+            # 2. Poll for result
+            for _ in range(30):  # Poll for up to 60s
+                await asyncio.sleep(2)
+                res_resp = await client.get(f"https://api.bfl.ai/v1/get_result?id={task_id}", headers=headers)
+                if res_resp.status_code != 200:
+                    continue
+                
+                data = res_resp.json()
+                status = data.get("status")
+                if status == "Ready":
+                    img_url = data.get("result", {}).get("sample")
+                    if not img_url:
+                        return None
+                    
+                    # 3. Download final image
+                    img_resp = await client.get(img_url, timeout=60.0)
+                    img_resp.raise_for_status()
+                    output_path.write_bytes(img_resp.content)
+                    return output_path
+                elif status in ("Error", "Task not found"):
+                    return None
+    except Exception:
+        return None
+    return None
+
+
+# ── Provider: Fal.ai (Flux) ──────────────────────────────────────────────────
+
+async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
+    """Returns path on success, None if no FAL_KEY or error.
+    Uses FLUX.1 [dev] via fal.ai with sync mode.
+    """
+    key = os.environ.get("FAL_KEY", "")
+    if not key:
+        return None
+
+    headers = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
+    payload = {
+        "input": {
+            "prompt": prompt,
+            "image_size": {"width": IMG_WIDTH, "height": IMG_HEIGHT},
+            "seed": seed,
+        }
+    }
+
+    try:
+        # Use sync endpoint for immediate response
+        url = "https://fal.run/fal-ai/flux/dev?sync_mode=true"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                return None
+            
+            data = resp.json()
+            images = data.get("images", [])
+            if not images:
+                return None
+            
+            img_url = images[0].get("url")
+            if not img_url:
+                return None
+            
+            # Download final image
+            img_resp = await client.get(img_url, timeout=60.0)
+            img_resp.raise_for_status()
+            output_path.write_bytes(img_resp.content)
+            return output_path
+    except Exception:
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def generate_image(
@@ -176,15 +281,19 @@ async def generate_image(
 
     Returns (path, is_placeholder). is_placeholder=True means all providers failed.
     providers: list of provider names to try, in order. Defaults to all available.
-    Available: "pollinations", "huggingface"
+    Available: "bfl", "fal", "pollinations", "huggingface"
     """
     if providers is None:
-        providers = ["pollinations", "huggingface"]
+        providers = ["bfl", "fal", "pollinations", "huggingface"]
 
     enriched = _enrich_prompt(prompt)
     for provider in providers:
         result = None
-        if provider == "pollinations":
+        if provider == "bfl":
+            result = await _try_bfl(enriched, output_path, seed)
+        elif provider == "fal":
+            result = await _try_fal(enriched, output_path, seed)
+        elif provider == "pollinations":
             result = await _try_pollinations(enriched, output_path, seed)
         elif provider == "huggingface":
             result = await _try_huggingface(enriched, output_path)
@@ -198,7 +307,7 @@ async def generate_images(
     prompts: list[str],
     out_dir: Path,
     providers: list[str] | None = None,
-    max_concurrent: int = 2,
+    max_concurrent: int = 1,
     on_image_done: Optional[Callable[[int, bool], None]] = None,
 ) -> tuple[list[Path], int]:
     """Generate images for all prompts in parallel (up to max_concurrent at once).

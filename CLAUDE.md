@@ -37,7 +37,7 @@ ruff check src/
 
 1. **Script** — `ai/openrouter.py` calls OpenRouter via the `openai` SDK pointed at a different base URL. Returns JSON with `hook`, `segments`, `cta`, `image_prompts`. Has automatic fallback through all `FREE_MODELS` on rate limit, empty response, or provider errors.
 2. **TTS** — `ai/tts.py` uses `edge-tts` (no key). Hook, each segment, and CTA are synthesised in parallel then concatenated into `narration.mp3`.
-3. **Images** — `ai/images.py` runs all image generations concurrently (semaphore of 3). Provider order: pollinations → huggingface → PIL placeholder. Each prompt gets cinematic style modifiers appended before generation.
+3. **Images** — `ai/images.py` runs all image generations concurrently (semaphore of 1). Provider order: bfl → fal → pollinations → huggingface → PIL placeholder. Each prompt gets cinematic style modifiers appended before generation.
 4. **Video clips** — each image becomes a clip with a Ken Burns motion via `zoompan` filter. Motion styles are picked so no two adjacent clips use the same style (`_pick_motions`).
 5. **Concat** — clips are joined with random `xfade` transitions via a single `filter_complex` chain.
 6. **Audio merge** — narration merged in, trimmed to shortest.
@@ -53,11 +53,13 @@ ruff check src/
 - Image generation is fire-and-forget with graceful degradation: any provider failure returns `None` and the next is tried; PIL placeholder is the guaranteed last resort.
 - `clamp_duration()` enforces the 58s ceiling on the actual narration duration (not the requested duration).
 
-### Free AI services
+### Free/Paid AI services
 
 | Service | Used for | Auth |
 |---|---|---|
 | OpenRouter free models | LLM script generation | `OPENROUTER_API_KEY` |
+| Black Forest Labs (Flux 1.1) | Premium Image generation | `BFL_API_KEY` (optional) |
+| Fal.ai (Flux Dev) | High-speed Image generation | `FAL_KEY` (optional) |
 | Pollinations.ai (`flux-realism`, `flux`) | Image generation | none |
 | HuggingFace Inference API | Image fallback | `HF_TOKEN` (optional) |
 | edge-tts | TTS voiceover | none |
