@@ -269,6 +269,65 @@ async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
         return None
 
 
+# ── Provider: Prodia ─────────────────────────────────────────────────────────
+
+async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
+    """Returns path on success, None if no PRODIA_TOKEN or error.
+    Uses FLUX.1 [schnell] via Prodia v2 API for maximum speed.
+    """
+    token = os.environ.get("PRODIA_TOKEN", "")
+    if not token:
+        return None
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "type": "inference.flux.schnell.txt2img.v1",
+        "config": {
+            "prompt": prompt,
+            "width": IMG_WIDTH,
+            "height": IMG_HEIGHT,
+            "seed": seed,
+            "steps": 4,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            # 1. Submit job
+            resp = await client.post("https://inference.prodia.com/v2/job", json=payload, headers=headers)
+            if resp.status_code != 200:
+                return None
+            job_id = resp.json().get("job")
+            if not job_id:
+                return None
+
+            # 2. Poll for completion
+            for _ in range(20):
+                await asyncio.sleep(1.5)
+                res_resp = await client.get(f"https://inference.prodia.com/v2/job/{job_id}", headers=headers)
+                if res_resp.status_code != 200:
+                    continue
+                
+                data = res_resp.json()
+                status = data.get("status")
+                if status == "succeeded":
+                    # Prodia v2 returns image buffer directly or a link depending on model,
+                    # but usually it's a GET to the same job ID with an Accept header for images.
+                    img_resp = await client.get(
+                        f"https://inference.prodia.com/v2/job/{job_id}",
+                        headers={**headers, "Accept": "image/jpeg"},
+                        timeout=60.0
+                    )
+                    img_resp.raise_for_status()
+                    output_path.write_bytes(img_resp.content)
+                    return output_path
+                elif status == "failed":
+                    return None
+    except Exception:
+        return None
+    return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def generate_image(
@@ -281,10 +340,10 @@ async def generate_image(
 
     Returns (path, is_placeholder). is_placeholder=True means all providers failed.
     providers: list of provider names to try, in order. Defaults to all available.
-    Available: "bfl", "fal", "pollinations", "huggingface"
+    Available: "bfl", "fal", "prodia", "pollinations", "huggingface"
     """
     if providers is None:
-        providers = ["bfl", "fal", "pollinations", "huggingface"]
+        providers = ["bfl", "fal", "prodia", "pollinations", "huggingface"]
 
     enriched = _enrich_prompt(prompt)
     for provider in providers:
@@ -293,6 +352,8 @@ async def generate_image(
             result = await _try_bfl(enriched, output_path, seed)
         elif provider == "fal":
             result = await _try_fal(enriched, output_path, seed)
+        elif provider == "prodia":
+            result = await _try_prodia(enriched, output_path, seed)
         elif provider == "pollinations":
             result = await _try_pollinations(enriched, output_path, seed)
         elif provider == "huggingface":
@@ -307,7 +368,7 @@ async def generate_images(
     prompts: list[str],
     out_dir: Path,
     providers: list[str] | None = None,
-    max_concurrent: int = 1,
+    max_concurrent: int = 4, # Increased for paid providers
     on_image_done: Optional[Callable[[int, bool], None]] = None,
 ) -> tuple[list[Path], int]:
     """Generate images for all prompts in parallel (up to max_concurrent at once).
@@ -316,6 +377,8 @@ async def generate_images(
     on_image_done(index, is_placeholder) is called as each image completes.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Adaptive concurrency: paid providers can handle more, free ones are throttled inside their methods
     sem = asyncio.Semaphore(max_concurrent)
 
     async def _gen(i: int, prompt: str) -> tuple[Path, bool]:

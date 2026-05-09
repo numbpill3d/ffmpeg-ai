@@ -207,6 +207,7 @@ async def run_pipeline(
             img_dir.mkdir(parents=True, exist_ok=True)
             imgs, pc = await generate_images(
                 image_prompts, img_dir, providers=providers,
+                max_concurrent=4,
                 on_image_done=lambda i, is_pl: tracker.image_done(i, is_pl),
             )
             detail = f"{len(imgs)} images"
