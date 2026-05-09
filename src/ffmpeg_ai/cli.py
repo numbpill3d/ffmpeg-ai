@@ -65,6 +65,7 @@ def main(ctx: typer.Context):
     arg_table.add_row("--providers",          "str",  "pollinations,huggingface", "Image provider order")
     arg_table.add_row("--no-ai-images",       "flag", "off",        "Disable AI image generation")
     arg_table.add_row("--thumbnail/--no-thumbnail", "flag", "on",  "Extract thumbnail JPEG alongside output")
+    arg_table.add_row("--no-captions",          "flag", "off",        "Skip whisper transcription and caption burn")
     arg_table.add_row("--fresh",              "flag", "off",        "Ignore cached job data, start from scratch")
     arg_table.add_row("-q / --quiet",         "flag", "off",        "Minimal output — one line per stage")
     arg_table.add_row("--dry-run",            "flag", "off",        "Generate script only, no video rendered")
@@ -115,6 +116,7 @@ def generate(
     thumbnail: bool = typer.Option(True, "--thumbnail/--no-thumbnail", help="Extract thumbnail alongside output"),
     style: Optional[str] = typer.Option(None, "--style", help=f"Tone preset: {', '.join(_STYLE_CHOICES)}"),
     caption_style: str = typer.Option("karaoke", "--caption-style", help=f"Caption style: {', '.join(_CAPTION_CHOICES)}"),
+    no_captions: bool = typer.Option(False, "--no-captions", help="Skip transcription and caption burning"),
 ):
     """[bold cyan]Generate a YouTube Short from a topic.[/]"""
     print_banner()
@@ -170,6 +172,7 @@ def generate(
         thumbnail=thumbnail,
         style=style,
         caption_style=caption_style,
+        no_captions=no_captions,
     ))
 
 

@@ -55,6 +55,7 @@ async def run_pipeline(
     thumbnail: bool = True,
     style: Optional[str] = None,
     caption_style: str = "karaoke",
+    no_captions: bool = False,
 ) -> Path:
     """
     images_dir:       use images from this directory instead of AI generation.
@@ -68,6 +69,7 @@ async def run_pipeline(
     thumbnail:        extract a thumbnail JPEG alongside the output file.
     style:            tone preset: educational, dramatic, listicle, documentary.
     caption_style:    karaoke, plain, or bold-center.
+    no_captions:      skip transcription and caption burn entirely.
     """
     start_time = time.time()
 
@@ -267,19 +269,31 @@ async def run_pipeline(
             tracker.complete("VIDEO", f"{n} clips  {total_dur:.1f}s")
 
             # ── 5. Captions ───────────────────────────────────────────────────
-            tracker.start("CAPTIONS", f"faster-whisper  [{caption_style}]")
-            ass_path      = tmp_dir / "captions.ass"
-            subtitle_path = audio_to_ass(combined_audio, ass_path, style=caption_style)
-            captioned     = tmp_dir / "captioned.mp4"
-            burn_captions(with_audio_path, subtitle_path, captioned)
-            tracker.complete("CAPTIONS", caption_style)
+            pre_caption = with_audio_path
+            if no_captions:
+                tracker.complete("CAPTIONS", "skipped (--no-captions)")
+                post_caption = pre_caption
+            else:
+                tracker.start("CAPTIONS", f"faster-whisper  [{caption_style}]")
+                try:
+                    ass_path      = tmp_dir / "captions.ass"
+                    subtitle_path = await asyncio.to_thread(
+                        audio_to_ass, combined_audio, ass_path, style=caption_style,
+                    )
+                    captioned     = tmp_dir / "captioned.mp4"
+                    await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
+                    tracker.complete("CAPTIONS", caption_style)
+                    post_caption = captioned
+                except Exception as cap_err:
+                    tracker.fail("CAPTIONS", f"skipped — {cap_err}")
+                    post_caption = pre_caption
 
             # ── 6. Music ──────────────────────────────────────────────────────
-            pre_encode = captioned
+            pre_encode = post_caption
             if music_path is not None and music_path.is_file():
                 tracker.start("MUSIC", f"{music_path.name}  sidechain")
                 with_music = tmp_dir / "with_music.mp4"
-                mix_music(captioned, music_path, with_music)
+                mix_music(post_caption, music_path, with_music)
                 tracker.complete("MUSIC", "auto-ducked")
                 pre_encode = with_music
 
