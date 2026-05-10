@@ -117,6 +117,10 @@ async def run_pipeline(
         hook = script["hook"]
         segments = script["segments"]
         cta = script["cta"]
+        viral = script.get("viral_package", {})
+
+        # Save metadata package
+        (job_dir / "metadata.json").write_text(json.dumps(viral, indent=2))
 
         tracker.print(Panel(
             stats_table({
@@ -319,10 +323,23 @@ async def run_pipeline(
 
             concat_with_transitions(clips, clip_durations, raw_video)
             merge_audio(raw_video, combined_audio, with_audio_path)
-            tracker.complete("VIDEO", f"{n} clips  {total_dur:.1f}s")
+            
+            # Apply hook overlay
+            hook_text = hook["text"]
+            # Escape single quotes for ffmpeg
+            escaped_text = hook_text.replace("'", "\\'")
+            hook_vf = (
+                f"drawtext=text='{escaped_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
+                f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:shadowx=2:shadowy=2:"
+                f"enable='between(t,0,3)'"
+            )
+            captioned_hook = tmp_dir / "hooked.mp4"
+            cmd = ["ffmpeg", "-y", "-i", str(with_audio_path), "-vf", hook_vf, "-c:a", "copy", str(captioned_hook)]
+            _run(cmd, "hook_overlay")
+            tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
 
             # ── 5. Captions ───────────────────────────────────────────────────
-            pre_caption = with_audio_path
+            pre_caption = captioned_hook
             if no_captions:
                 tracker.complete("CAPTIONS", "skipped (--no-captions)")
                 post_caption = pre_caption

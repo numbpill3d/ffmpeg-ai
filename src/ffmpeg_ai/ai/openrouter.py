@@ -125,18 +125,22 @@ Return JSON with exactly this shape:
     }}
   ],
   "cta": {{
-    "text": "urgent closing CTA — max 8 words, MUST end the script logically",
+    "text": "urgent closing CTA — max 12 words, MUST end with a controversial question to drive comments",
     "visual_prompts": ["AI image prompt for the CTA"]
+  }},
+  "viral_package": {{
+    "hashtags": ["#tag1", "#tag2", "#tag3"],
+    "description": "100-character description for upload",
+    "thumbnail_prompt": "High-contrast visual prompt for a YouTube Short thumbnail, bold text, viral style"
   }}
 }}
 
 Requirements:
 - Produce exactly {n_segments} segments.
-- Total narration word count MUST be under 130 words to ensure it fits in {target_dur}s.
-- Each segment MUST have 2 distinct "visual_prompts" that accurately depict the "text" of that segment.
+- Total narration word count MUST be under 130 words.
+- Each segment MUST have 2 distinct "visual_prompts".
 - Hook and CTA MUST each have 1 distinct "visual_prompts".
-- Visual prompts MUST suit 9:16 vertical framing.
-- The script MUST be a complete story or list that logically concludes with the CTA. DO NOT let it ramble.
+- The script MUST be a complete story that logically concludes with a question in the CTA to drive engagement.
 - Script language: active voice, second person ("you"), present tense."""
 
     resp = await client.chat.completions.create(
