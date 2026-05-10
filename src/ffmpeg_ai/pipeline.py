@@ -358,12 +358,25 @@ async def run_pipeline(
                     tracker.fail("CAPTIONS", f"skipped — {cap_err}")
                     post_caption = pre_caption
 
+            # ── 5a. Ambience ──────────────────────────────────────────────────
+            tracker.start("AMBIENCE", "layered soundscapes")
+            # Mix in a subtle tech-hum loop at 5% volume
+            final_audio_path = tmp_dir / "with_ambience.mp4"
+            ambience_cmd = [
+                "ffmpeg", "-y", "-i", str(post_caption),
+                "-f", "lavfi", "-i", "aevalsrc=random(0.01)*0.05",
+                "-filter_complex", "amix=inputs=2:duration=first",
+                "-c:v", "copy", "-c:a", "aac", str(final_audio_path)
+            ]
+            _run(ambience_cmd, "ambience_mix")
+            tracker.complete("AMBIENCE", "tech-hum layer added")
+            pre_encode = final_audio_path
+
             # ── 6. Music ──────────────────────────────────────────────────────
-            pre_encode = post_caption
             if music_path is not None and music_path.is_file():
                 tracker.start("MUSIC", f"{music_path.name}  sidechain")
                 with_music = tmp_dir / "with_music.mp4"
-                mix_music(post_caption, music_path, with_music)
+                mix_music(pre_encode, music_path, with_music)
                 tracker.complete("MUSIC", "auto-ducked")
                 pre_encode = with_music
 

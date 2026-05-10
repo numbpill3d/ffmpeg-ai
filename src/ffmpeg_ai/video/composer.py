@@ -36,25 +36,30 @@ def get_audio_duration(audio_path: Path) -> float:
 
 MOTION_STYLES = [
     "zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down",
-    "diagonal_tr", "diagonal_bl", "subtle_zoom",
+    "diagonal_tr", "diagonal_bl", "subtle_zoom", "pop_in",
 ]
 
-
 def _kenburns_filter(motion: str, duration: float, w: int = WIDTH, h: int = HEIGHT) -> str:
-    """Return a zoompan filter string for the given motion style.
-
-    Zoom step is scaled to duration so short clips (1.5s) travel the same
-    visual distance as long ones — motion always feels intentional.
-    """
     d = int(duration * FPS)
+    # Rhythmic Pop-in: zoom very fast for the first 0.5s then ease
+    if motion == "pop_in":
+        zoom_speed = 0.4 / max(d, 1)
+        return (
+            f"zoompan=z='min(zoom+{zoom_speed:.6f},1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={d}:s={w}x{h}:fps={FPS}"
+        )
+
     # Scale step so zoom travels full 0.2 range regardless of clip length
     step = 0.2 / max(d, 1)
     step6 = f"{step:.6f}"
+    # ... (other motions)
     if motion == "zoom_in":
         return (
             f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={w}x{h}:fps={FPS}"
         )
+    # ...
+
     if motion == "zoom_out":
         return (
             f"zoompan=z='if(eq(on,1),1.2,max(zoom-{step6},1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
