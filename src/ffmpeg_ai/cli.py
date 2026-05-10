@@ -13,7 +13,6 @@ from rich import box
 from .ui.display import print_banner, console
 from .ai.openrouter import FREE_MODELS, STYLE_PRESETS
 from .ai.tts import VOICES
-from .ai.images import USER_IMAGES_DIR
 
 load_dotenv()
 app = typer.Typer(

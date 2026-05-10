@@ -19,16 +19,15 @@ from rich import box
 from .ui.display import console
 from .ui.widgets import PipelineTracker, stats_table
 from .ai.openrouter import generate_script, FREE_MODELS
-from .ai.images import generate_images, load_user_images, USER_IMAGES_DIR
+from .ai.images import generate_images, load_user_images
 from .ai.tts import synthesize_segments, synthesize, DEFAULT_VOICE
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
     merge_audio, mix_music, burn_captions, final_encode, get_audio_duration,
     detect_beats, snap_to_beats, extract_thumbnail,
-    MOTION_STYLES,
+    MOTION_STYLES, _run,
 )
 from .video.captions import audio_to_ass
-from .video.shorts import clamp_duration
 
 _JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
 
