@@ -78,8 +78,6 @@ async def run_pipeline(
         shutil.rmtree(job_dir, ignore_errors=True)
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    n_images_target = max(12, int(duration / 2.2))
-
     stages = ["SCRIPT", "TTS", "IMAGES", "VIDEO", "CAPTIONS"]
     if music_path and music_path.is_file():
         stages.append("MUSIC")
@@ -92,32 +90,39 @@ async def run_pipeline(
 
         if script_path is not None:
             script = json.loads(Path(script_path).read_text())
-            n_s = len(script.get("segments", []))
-            n_i = len(script.get("image_prompts", []))
-            tracker.complete("SCRIPT", f"{n_s} segs  {n_i} images  (loaded)", cached=True)
+            tracker.complete("SCRIPT", "loaded from file", cached=True)
         elif not fresh and script_cache.exists():
             script = json.loads(script_cache.read_text())
-            n_s = len(script.get("segments", []))
-            n_i = len(script.get("image_prompts", []))
-            tracker.complete("SCRIPT", f"{n_s} segs  {n_i} images", cached=True)
+            tracker.complete("SCRIPT", "loaded from cache", cached=True)
         else:
             model_short = model.split("/")[-1]
             tracker.start("SCRIPT", f"model: {model_short}")
             script = await generate_script(
                 topic, duration=duration, model=model,
-                n_images=n_images_target, style=style,
+                style=style,
             )
             script_cache.write_text(json.dumps(script, indent=2))
-            n_s = len(script.get("segments", []))
-            n_i = len(script.get("image_prompts", []))
-            tracker.complete("SCRIPT", f"{n_s} segs  {n_i} images")
+            tracker.complete("SCRIPT", "generated new script")
+
+        # Adapter for old script format
+        if "hook" in script and isinstance(script["hook"], str):
+            script["hook"] = {"text": script["hook"], "visual_prompts": [topic]}
+        if "cta" in script and isinstance(script["cta"], str):
+            script["cta"] = {"text": script["cta"], "visual_prompts": [topic]}
+        for s in script["segments"]:
+            if "visual_prompts" not in s:
+                # migrate old 'visual' key
+                s["visual_prompts"] = [s.get("visual", topic)]
+
+        hook = script["hook"]
+        segments = script["segments"]
+        cta = script["cta"]
 
         tracker.print(Panel(
             stats_table({
                 "title":    script.get("title", ""),
-                "hook":     script.get("hook", "")[:80],
-                "segments": str(len(script.get("segments", []))),
-                "images":   str(len(script.get("image_prompts", []))),
+                "hook":     hook["text"][:80],
+                "segments": str(len(segments)),
             }),
             title="[cyan]script[/]", border_style="bright_black", box=box.ROUNDED,
         ))
@@ -140,41 +145,62 @@ async def run_pipeline(
                 tracker.complete(s, "skipped (dry run)")
             return output_path
 
-        segments = script["segments"]
-        image_prompts = script.get("image_prompts", [s.get("visual", topic) for s in segments])
-        n = len(image_prompts)
-        providers = image_providers or ["bfl", "fal", "pollinations", "huggingface"]
+        providers = image_providers or ["bfl", "fal", "prodia", "pollinations", "huggingface"]
 
-        # ── 2+3. TTS + Images (parallel) ─────────────────────────────────────
+        # ── 2+3. TTS + Images (Semantic Sync) ────────────────────────────────
         tts_dir        = job_dir / "tts"
         img_dir        = job_dir / "images"
         combined_audio = job_dir / "narration.mp3"
+        
+        tts_dir.mkdir(parents=True, exist_ok=True)
+        img_dir.mkdir(parents=True, exist_ok=True)
 
         tracker.start("TTS",    f"voice: {voice.split('-')[-1]}")
-        tracker.start("IMAGES", f"{n} frames")
-        tracker.set_image_count(n)
-
-        async def _do_tts() -> tuple[Path, float]:
-            if not fresh and combined_audio.exists():
-                dur = clamp_duration(await asyncio.to_thread(get_audio_duration, combined_audio))
-                tracker.complete("TTS", f"{dur:.1f}s", cached=True)
-                return combined_audio, dur
-            tts_dir.mkdir(parents=True, exist_ok=True)
+        
+        async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
+            # 1. Synthesize all parts
             hook_audio = tts_dir / "hook.mp3"
-            await synthesize(script.get("hook", ""), hook_audio, voice=voice)
+            await synthesize(hook["text"], hook_audio, voice=voice)
+            
             seg_audios = await synthesize_segments(segments, tts_dir, voice=voice)
-            cta_audio  = tts_dir / "cta.mp3"
-            await synthesize(script.get("cta", ""), cta_audio, voice=voice)
+            
+            cta_audio = tts_dir / "cta.mp3"
+            await synthesize(cta["text"], cta_audio, voice=voice)
+            
             all_a = [hook_audio] + list(seg_audios) + [cta_audio]
             await asyncio.to_thread(concat_audio, all_a, combined_audio)
-            dur = clamp_duration(await asyncio.to_thread(get_audio_duration, combined_audio))
-            tracker.complete("TTS", f"{dur:.1f}s")
-            return combined_audio, dur
+            
+            # 2. Map parts to visual prompts and measure durations
+            timeline_prompts = []
+            part_mapping = [] # list of (duration, n_images)
+            
+            h_dur = await asyncio.to_thread(get_audio_duration, hook_audio)
+            timeline_prompts.extend(hook["visual_prompts"])
+            part_mapping.append((h_dur, len(hook["visual_prompts"])))
+            
+            for i, seg in enumerate(segments):
+                s_dur = await asyncio.to_thread(get_audio_duration, seg_audios[i])
+                timeline_prompts.extend(seg["visual_prompts"])
+                part_mapping.append((s_dur, len(seg["visual_prompts"])))
+                
+            c_dur = await asyncio.to_thread(get_audio_duration, cta_audio)
+            timeline_prompts.extend(cta["visual_prompts"])
+            part_mapping.append((c_dur, len(cta["visual_prompts"])))
+            
+            total_dur = sum(d for d, _ in part_mapping)
+            tracker.complete("TTS", f"{total_dur:.1f}s")
+            return combined_audio, total_dur, timeline_prompts, part_mapping
+
+        # We must do TTS first to get durations, then Images
+        combined_audio, total_dur, image_prompts, part_mapping = await _do_tts_and_sync()
+        
+        n_total_images = len(image_prompts)
+        tracker.start("IMAGES", f"{n_total_images} frames (synced)")
+        tracker.set_image_count(n_total_images)
 
         async def _do_images() -> tuple[list[Path], int]:
             if images_dir is not None:
-                img_dir.mkdir(parents=True, exist_ok=True)
-                src = load_user_images(images_dir, n)
+                src = load_user_images(images_dir, n_total_images)
                 imgs: list[Path] = []
                 for i, s in enumerate(src):
                     dst = img_dir / f"frame_{i:03d}{s.suffix.lower()}"
@@ -184,27 +210,26 @@ async def run_pipeline(
                 tracker.complete("IMAGES", f"{len(imgs)} user images")
                 return imgs, 0
 
+            # Always regenerate if counts don't match exactly
             cached_frames = sorted(img_dir.glob("frame_*.jpg")) if img_dir.is_dir() else []
-            if not fresh and len(cached_frames) >= n:
-                imgs = cached_frames[:n]
+            if not fresh and len(cached_frames) == n_total_images:
+                imgs = cached_frames
                 for i in range(len(imgs)):
                     tracker.image_done(i, False)
-                tracker.complete("IMAGES", f"{n} cached", cached=True)
+                tracker.complete("IMAGES", f"{n_total_images} cached", cached=True)
                 return imgs, 0
 
             if not use_ai_images:
                 from .ai.images import _make_placeholder
-                img_dir.mkdir(parents=True, exist_ok=True)
                 imgs = [
                     _make_placeholder(p, img_dir / f"frame_{i:03d}.jpg")
                     for i, p in enumerate(image_prompts)
                 ]
                 for i in range(len(imgs)):
                     tracker.image_done(i, True)
-                tracker.complete("IMAGES", f"{n} placeholders")
-                return imgs, n
+                tracker.complete("IMAGES", f"{n_total_images} placeholders")
+                return imgs, n_total_images
 
-            img_dir.mkdir(parents=True, exist_ok=True)
             imgs, pc = await generate_images(
                 image_prompts, img_dir, providers=providers,
                 max_concurrent=4,
@@ -216,14 +241,41 @@ async def run_pipeline(
             tracker.complete("IMAGES", detail)
             return imgs, pc
 
-        (combined_audio, total_dur), (images, placeholder_count) = await asyncio.gather(
-            _do_tts(), _do_images(),
-        )
+        images, placeholder_count = await _do_images()
 
         # ── 4. Video clips ────────────────────────────────────────────────────
-        n = len(images)
-        clip_durations = _energy_curve_durations(n, total_dur)
+        # 1. Create raw durations from audio parts
+        raw_clip_durations = []
+        for p_dur, n_imgs in part_mapping:
+            avg = p_dur / n_imgs
+            raw_clip_durations.extend([avg] * n_imgs)
+        
+        # 2. Compensate for xfade transition overlaps
+        # sum(clip_durations) must be total_dur + (n_clips - 1) * trans_d
+        n_clips = len(images)
+        trans_d = min(0.4, min(raw_clip_durations) * 0.25) if n_clips > 1 else 0
+        total_overlap = (n_clips - 1) * trans_d
+        extra_per_clip = total_overlap / n_clips
+        clip_durations = [d + extra_per_clip for d in raw_clip_durations]
+        
+        # 3. Limit to 58s
+        if total_dur > 58.0:
+            total_dur = 58.0
+            # Truncate timeline
+            current_v_sum = 0
+            new_durations = []
+            for d in clip_durations:
+                # We need to account for transitions in the limit check too, 
+                # but simplest is to just cap the sum.
+                if current_v_sum + d > 58.0 + total_overlap:
+                    break
+                new_durations.append(d)
+                current_v_sum += d
+            clip_durations = new_durations
+            images = images[:len(clip_durations)]
+            n_clips = len(images)
 
+        # 4. Music Beat Snapping
         if music_path is not None and music_path.is_file():
             beats = detect_beats(music_path)
             if beats:
@@ -232,13 +284,13 @@ async def run_pipeline(
                 for d in clip_durations[:-1]:
                     t += d
                     cut_t.append(t)
-                snapped = snap_to_beats(cut_t, beats) + [total_dur]
+                snapped = snap_to_beats(cut_t, beats) + [sum(clip_durations)]
                 clip_durations = [snapped[0]] + [
                     max(0.5, snapped[i] - snapped[i - 1]) for i in range(1, len(snapped))
                 ]
 
-        motions = _pick_motions(n)
-        tracker.start("VIDEO", f"{n} clips  Ken Burns · xfade")
+        motions = _pick_motions(n_clips)
+        tracker.start("VIDEO", f"{n_clips} clips  Ken Burns · xfade")
 
         with tempfile.TemporaryDirectory(prefix="ffai_") as tmp:
             tmp_dir  = Path(tmp)
@@ -254,14 +306,14 @@ async def run_pipeline(
                     motion=motions[idx],
                 )
                 done_clips[0] += 1
-                tracker.update("VIDEO", done_clips[0], n)
+                tracker.update("VIDEO", done_clips[0], n_clips)
                 return idx, path
 
             with ThreadPoolExecutor(max_workers=4) as ex:
-                for idx, path in ex.map(_render_clip, range(n)):
+                for idx, path in ex.map(_render_clip, range(n_clips)):
                     clips_dict[idx] = path
 
-            clips           = [clips_dict[i] for i in range(n)]
+            clips           = [clips_dict[i] for i in range(n_clips)]
             raw_video       = tmp_dir / "raw.mp4"
             with_audio_path = tmp_dir / "with_audio.mp4"
 

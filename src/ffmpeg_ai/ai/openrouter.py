@@ -102,41 +102,47 @@ async def _generate_script(
     if style and style in STYLE_PRESETS:
         system += f"\n\nSTYLE DIRECTIVE — apply this tone and structure throughout:\n{STYLE_PRESETS[style]}"
 
-    n_segments = max(5, duration // 7)
-    user = f"""Write a {duration}-second YouTube Short script about: "{topic}"
+    # YouTube Shorts are best under 50s to avoid the 60s hard limit and allow for overhead.
+    target_dur = min(duration, 50)
+    n_segments = max(4, target_dur // 8)
+    
+    user = f"""Write a YouTube Short script about: "{topic}"
 
 Return JSON with exactly this shape:
 {{
   "title": "punchy curiosity-gap title, 5-8 words",
-  "hook": "opening line — ≤12 words, shocking stat, bold claim, or question that stops the scroll",
+  "hook": {{
+    "text": "opening line — ≤12 words, shocking stat or question",
+    "visual_prompts": ["AI image prompt for the hook"]
+  }},
   "segments": [
     {{
       "text": "narration — direct, conversational, no filler words",
-      "duration": 7,
-      "visual": "precise visual direction: subject + action + framing + lighting mood"
+      "visual_prompts": [
+        "AI image prompt 1 (highly specific: subject, action, framing, lighting, 8k, cinematic)",
+        "AI image prompt 2 (variation: different angle or detail of the same scene)"
+      ]
     }}
   ],
-  "cta": "urgent closing CTA — max 10 words, creates FOMO or triggers follow",
-  "image_prompts": [
-    "ultra-detailed AI image generation prompt: subject, specific camera angle, lighting type, color palette, mood, photo style"
-  ]
+  "cta": {{
+    "text": "urgent closing CTA — max 8 words, MUST end the script logically",
+    "visual_prompts": ["AI image prompt for the CTA"]
+  }}
 }}
 
 Requirements:
-- Produce exactly {n_segments} segments
-- Segment durations vary between 4–10s each — vary the pacing for rhythm
-- Segments total duration ≈ {duration - 6}s
-- Produce exactly {n_images} image_prompts — B-roll frames for rapid TikTok-style cuts
-- Image prompts MUST be highly specific: subject, camera angle, lighting, color palette, visual style
-- Image prompts MUST suit 9:16 vertical framing — tall subjects, vertical leading lines
-- Image prompts MUST vary dramatically in angle, distance, and mood
-- Script language: active voice, second person ("you"), present tense, conversational
-- Each segment creates a distinct visual beat — varied energy"""
+- Produce exactly {n_segments} segments.
+- Total narration word count MUST be under 130 words to ensure it fits in {target_dur}s.
+- Each segment MUST have 2 distinct "visual_prompts" that accurately depict the "text" of that segment.
+- Hook and CTA MUST each have 1 distinct "visual_prompts".
+- Visual prompts MUST suit 9:16 vertical framing.
+- The script MUST be a complete story or list that logically concludes with the CTA. DO NOT let it ramble.
+- Script language: active voice, second person ("you"), present tense."""
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.8,
+        temperature=0.7, # Lowered for more consistency
         max_tokens=3500,
         timeout=60,
     )
