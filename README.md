@@ -18,13 +18,12 @@ a python cli that generates youtube shorts end-to-end using only free ai service
 
 ## what it does
 
-1. generates a script from your topic via openrouter (free llm tier)
-2. fetches ai images from pollinations.ai for each scene (no auth required)
-3. synthesizes voiceover using edge-tts (microsoft tts, completely free)
-4. transcribes audio locally with faster-whisper to produce captions
-5. composes everything into a shorts-ready mp4 via ffmpeg
-
-zero paid api calls required. one openrouter account for the script step is the only external dependency.
+1. generates a script from your topic via openrouter
+2. fetches high-quality AI images (supports **Flux 1.1** via BFL/Fal.ai/Prodia, or free fallbacks)
+3. **Semantic Sync:** images are semantically linked to script segments for maximum relevance
+4. synthesizes voiceover using edge-tts (microsoft tts, completely free)
+5. transcribes audio locally with faster-whisper to produce captions
+6. composes everything into a shorts-ready mp4 via ffmpeg with cinematic motion
 
 ---
 
@@ -78,12 +77,13 @@ ffmpeg-ai generate "deep sea creatures ranked"
 
 ---
 
-## free ai services used
+## ai services used
 
 | service            | purpose              | auth required |
 |--------------------|----------------------|---------------|
-| openrouter         | script generation    | free api key  |
-| pollinations.ai    | image generation     | none          |
+| openrouter         | script generation    | api key       |
+| **Flux (BFL/Fal)** | premium images       | optional      |
+| pollinations.ai    | free image fallback  | none          |
 | edge-tts           | voiceover / tts      | none          |
 | faster-whisper     | local transcription  | none (local)  |
 
