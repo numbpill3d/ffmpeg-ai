@@ -24,8 +24,8 @@ from .ai.tts import synthesize_segments, synthesize, DEFAULT_VOICE
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
     merge_audio, mix_music, burn_captions, final_encode, get_audio_duration,
-    detect_beats, snap_to_beats, extract_thumbnail,
-    MOTION_STYLES, _run,
+    detect_beats, snap_to_beats, extract_thumbnail, add_hook_overlay, add_ambience,
+    MOTION_STYLES,
 )
 from .video.captions import audio_to_ass
 
@@ -45,14 +45,6 @@ def _find_font() -> str:
         "/usr/share/fonts/DejaVuSans-Bold.ttf",
     ]
     return next((f for f in candidates if Path(f).exists()), "")
-
-
-def _escape_drawtext(text: str) -> str:
-    """Escape text for ffmpeg drawtext filter option value."""
-    text = text.replace("\\", "\\\\")
-    text = text.replace("'", "\\'")
-    text = text.replace(":", "\\:")
-    return text
 
 
 async def run_pipeline(
@@ -356,21 +348,8 @@ async def run_pipeline(
             merge_audio(raw_video, combined_audio, with_audio_path)
 
             # Apply hook overlay
-            hook_text = hook["text"]
-            escaped_text = _escape_drawtext(hook_text)
-            font_path = _find_font()
-            fontfile_arg = f"fontfile={font_path}:" if font_path else ""
-            hook_vf = (
-                f"drawtext=text='{escaped_text}':{fontfile_arg}"
-                f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
-                f"shadowx=2:shadowy=2:enable='between(t,0,3)'"
-            )
             captioned_hook = tmp_dir / "hooked.mp4"
-            cmd = [
-                "ffmpeg", "-y", "-i", str(with_audio_path),
-                "-vf", hook_vf, "-c:a", "copy", str(captioned_hook),
-            ]
-            _run(cmd, "hook_overlay")
+            add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
             tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
 
             # ── 5. Captions ───────────────────────────────────────────────────
@@ -396,14 +375,7 @@ async def run_pipeline(
             # ── 5a. Ambience ──────────────────────────────────────────────────
             tracker.start("AMBIENCE", "layered soundscapes")
             final_audio_path = tmp_dir / "with_ambience.mp4"
-            ambience_cmd = [
-                "ffmpeg", "-y", "-i", str(post_caption),
-                "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:r=44100",
-                "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first[aout]",
-                "-map", "0:v", "-map", "[aout]",
-                "-c:v", "copy", "-c:a", "aac", str(final_audio_path),
-            ]
-            _run(ambience_cmd, "ambience_mix")
+            add_ambience(post_caption, final_audio_path)
             tracker.complete("AMBIENCE", "tech-hum layer added")
             pre_encode = final_audio_path
 

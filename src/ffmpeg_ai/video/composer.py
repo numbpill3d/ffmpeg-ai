@@ -196,21 +196,6 @@ def concat_with_transitions(
     return output_path
 
 
-def concat_videos(video_paths: list[Path], output_path: Path) -> Path:
-    """Concatenate video clips using ffmpeg concat demuxer (no transitions)."""
-    list_file = output_path.parent / "concat_list.txt"
-    list_file.write_text("\n".join(f"file '{p.resolve()}'" for p in video_paths))
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0", "-i", str(list_file),
-        "-c", "copy",
-        str(output_path),
-    ]
-    _run(cmd, "concat")
-    list_file.unlink(missing_ok=True)
-    return output_path
-
-
 def merge_audio(video_path: Path, audio_path: Path, output_path: Path) -> Path:
     """Merge audio track into video, trimming to shortest."""
     cmd = [
@@ -396,4 +381,49 @@ def extract_thumbnail(video_path: Path, output_path: Path, position_pct: float =
         "-vframes", "1", "-q:v", "2", str(output_path),
     ]
     _run(cmd, "extract_thumbnail")
+    return output_path
+
+
+# ── Overlay / ambience ────────────────────────────────────────────────────────
+
+def _escape_drawtext(text: str) -> str:
+    """Escape text for ffmpeg drawtext filter option value."""
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\\'")
+    text = text.replace(":", "\\:")
+    return text
+
+
+def add_hook_overlay(
+    video_path: Path,
+    text: str,
+    font_path: str,
+    output_path: Path,
+) -> Path:
+    """Burn centered hook text over the first 3 seconds of a video."""
+    escaped = _escape_drawtext(text)
+    fontfile_arg = f"fontfile={font_path}:" if font_path else ""
+    vf = (
+        f"drawtext=text='{escaped}':{fontfile_arg}"
+        f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
+        f"shadowx=2:shadowy=2:enable='between(t,0,3)'"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vf", vf, "-c:a", "copy", str(output_path),
+    ]
+    _run(cmd, "hook_overlay")
+    return output_path
+
+
+def add_ambience(video_path: Path, output_path: Path) -> Path:
+    """Mix a low-level white-noise ambience layer into the audio track."""
+    cmd = [
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:r=44100",
+        "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first[aout]",
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", str(output_path),
+    ]
+    _run(cmd, "ambience_mix")
     return output_path
