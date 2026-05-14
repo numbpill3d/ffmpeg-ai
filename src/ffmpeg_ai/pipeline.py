@@ -117,7 +117,7 @@ async def run_pipeline(
         def _adapt_script(s: dict) -> dict:
             def _fix_vp(obj: dict, fallback: str) -> None:
                 vp = obj.get("visual_prompts")
-                if not isinstance(vp, list):
+                if not isinstance(vp, list) or len(vp) == 0:
                     obj["visual_prompts"] = [vp] if isinstance(vp, str) else [fallback]
 
             if "hook" in s and isinstance(s["hook"], str):
