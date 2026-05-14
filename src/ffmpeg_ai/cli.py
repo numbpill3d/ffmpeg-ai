@@ -107,12 +107,14 @@ def main(ctx: typer.Context):
     )
     env_table.add_column("var",  style="bold cyan", no_wrap=True)
     env_table.add_column("desc", style="white")
-    env_table.add_row("OPENROUTER_API_KEY", "required — LLM script generation  [dim](free tier)[/]")
-    env_table.add_row("BFL_API_KEY",        "optional — enables Black Forest Labs image provider")
-    env_table.add_row("FAL_KEY",            "optional — enables Fal.ai image provider")
-    env_table.add_row("PRODIA_TOKEN",       "optional — enables Prodia image provider")
-    env_table.add_row("HF_TOKEN",           "optional — enables HuggingFace image provider")
-    env_table.add_row("EDITOR",             "editor for --edit-script  [dim](default: nano)[/]")
+    env_table.add_row("OPENROUTER_API_KEY", "required — LLM script generation [dim](free tier)[/]")
+    env_table.add_row("BFL_API_KEY", "optional — Black Forest Labs [dim](paid)[/]")
+    env_table.add_row("FAL_KEY", "optional — Fal.ai [dim](paid)[/]")
+    env_table.add_row("PRODIA_TOKEN", "optional — Prodia [dim](paid)[/]")
+    env_table.add_row("HF_TOKEN", "optional — HuggingFace [dim](free)[/]")
+    env_table.add_row("STABLE_HORDE_API_KEY", "optional — community GPU cluster [dim](free)[/]")
+    env_table.add_row("TOGETHER_API_KEY", "optional — Together AI FLUX schnell [dim](free)[/]")
+    env_table.add_row("EDITOR", "editor for --edit-script [dim](default: nano)[/]")
     console.print(Panel(
         env_table, title="[bold white]env vars  (.env supported)[/]",
         border_style="bright_black", box=box.ROUNDED,
@@ -323,15 +325,23 @@ def providers():
     fal_key    = os.environ.get("FAL_KEY", "")
     prodia_key = os.environ.get("PRODIA_TOKEN", "")
     hf_key     = os.environ.get("HF_TOKEN", "")
+    horde_key  = os.environ.get("STABLE_HORDE_API_KEY", "")
+    together_key = os.environ.get("TOGETHER_API_KEY", "")
 
     def _status(key: str) -> str:
         return "[green]ready[/]" if key else "[dim]key not set[/]"
 
-    t.add_row("bfl",          "BFL_API_KEY",  _status(bfl_key))
-    t.add_row("fal",          "FAL_KEY",      _status(fal_key))
-    t.add_row("prodia",       "PRODIA_TOKEN", _status(prodia_key))
-    t.add_row("pollinations", "none",         "[green]ready[/]")
-    t.add_row("huggingface",  "HF_TOKEN",     _status(hf_key))
+    t.add_row("bfl",          "BFL_API_KEY",         _status(bfl_key))
+    t.add_row("fal",          "FAL_KEY",             _status(fal_key))
+    t.add_row("prodia",       "PRODIA_TOKEN",         _status(prodia_key))
+    t.add_row("pollinations", "none",                 "[green]ready[/]")
+    t.add_row("huggingface",  "HF_TOKEN",             _status(hf_key))
+    t.add_row(
+        "stable_horde",
+        "STABLE_HORDE_API_KEY",
+        "[green]ready (registered)[/]" if horde_key else "[green]ready (guest)[/]",
+    )
+    t.add_row("together",     "TOGETHER_API_KEY",     _status(together_key))
     console.print(t)
 
 

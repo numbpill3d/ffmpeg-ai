@@ -13,9 +13,18 @@ _CINEMATIC_STYLES = [
     "vertical cinematic shot, professional color grading, rich vivid colors, sharp focus, 8K",
     "dramatic vertical composition, golden hour rim lighting, atmospheric depth, photorealistic",
     "vertical portrait frame, high contrast dramatic lighting, rich color palette, ultra HD",
-    "cinematic wide angle vertical shot, moody atmosphere, detailed texture, professional photography",
-    "vertical frame, neon-accented dramatic lighting, deep shadows, cyberpunk realism, hyper detailed",
-    "vertical composition, soft cinematic bokeh, golden warm tones, shallow depth of field, film grain",
+    (
+        "cinematic wide angle vertical shot, moody atmosphere, "
+        "detailed texture, professional photography"
+    ),
+    (
+        "vertical frame, neon-accented dramatic lighting, "
+        "deep shadows, cyberpunk realism, hyper detailed"
+    ),
+    (
+        "vertical composition, soft cinematic bokeh, "
+        "golden warm tones, shallow depth of field, film grain"
+    ),
 ]
 
 
@@ -92,7 +101,7 @@ _POLLINATIONS_MODELS = ["flux-realism", "flux"]
 
 
 async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None on failure (don't raise).
+    """Returns path on success, None on failure.
     Tries flux-realism first (better quality), falls back to flux.
     """
     encoded = urllib.parse.quote(prompt, safe="")
@@ -101,12 +110,11 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
             f"https://image.pollinations.ai/prompt/{encoded}"
             f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
         )
-        for attempt in range(4):  # Increased attempts
+        for attempt in range(4):
             try:
                 async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
                     resp = await client.get(url)
                     if resp.status_code == 429:
-                        # Heavy backoff for rate limits
                         await asyncio.sleep(10 * (attempt + 1) + random.uniform(1, 5))
                         continue
                     resp.raise_for_status()
@@ -151,7 +159,6 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
                 async with httpx.AsyncClient(timeout=90.0) as client:
                     resp = await client.post(url, json=body, headers=headers)
                 if resp.status_code == 503:
-                    # Model loading — wait the suggested time then retry once
                     import json
                     try:
                         wait = json.loads(resp.content).get("estimated_time", 20)
@@ -190,29 +197,30 @@ async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # 1. Submit task
-            resp = await client.post("https://api.bfl.ai/v1/flux-pro-1.1", json=payload, headers=headers)
+            resp = await client.post(
+                "https://api.bfl.ai/v1/flux-pro-1.1",
+                json=payload, headers=headers,
+            )
             if resp.status_code != 200:
                 return None
             task_id = resp.json().get("id")
             if not task_id:
                 return None
 
-            # 2. Poll for result
-            for _ in range(30):  # Poll for up to 60s
+            for _ in range(30):  # poll up to 60s
                 await asyncio.sleep(2)
-                res_resp = await client.get(f"https://api.bfl.ai/v1/get_result?id={task_id}", headers=headers)
+                res_resp = await client.get(
+                    f"https://api.bfl.ai/v1/get_result?id={task_id}",
+                    headers=headers,
+                )
                 if res_resp.status_code != 200:
                     continue
-                
                 data = res_resp.json()
                 status = data.get("status")
                 if status == "Ready":
                     img_url = data.get("result", {}).get("sample")
                     if not img_url:
                         return None
-                    
-                    # 3. Download final image
                     img_resp = await client.get(img_url, timeout=60.0)
                     img_resp.raise_for_status()
                     output_path.write_bytes(img_resp.content)
@@ -244,23 +252,18 @@ async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
     }
 
     try:
-        # Use sync endpoint for immediate response
         url = "https://fal.run/fal-ai/flux/dev?sync_mode=true"
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code != 200:
                 return None
-            
             data = resp.json()
             images = data.get("images", [])
             if not images:
                 return None
-            
             img_url = images[0].get("url")
             if not img_url:
                 return None
-            
-            # Download final image
             img_resp = await client.get(img_url, timeout=60.0)
             img_resp.raise_for_status()
             output_path.write_bytes(img_resp.content)
@@ -293,30 +296,31 @@ async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # 1. Submit job
-            resp = await client.post("https://inference.prodia.com/v2/job", json=payload, headers=headers)
+            resp = await client.post(
+                "https://inference.prodia.com/v2/job",
+                json=payload, headers=headers,
+            )
             if resp.status_code != 200:
                 return None
             job_id = resp.json().get("job")
             if not job_id:
                 return None
 
-            # 2. Poll for completion
             for _ in range(20):
                 await asyncio.sleep(1.5)
-                res_resp = await client.get(f"https://inference.prodia.com/v2/job/{job_id}", headers=headers)
+                res_resp = await client.get(
+                    f"https://inference.prodia.com/v2/job/{job_id}",
+                    headers=headers,
+                )
                 if res_resp.status_code != 200:
                     continue
-                
                 data = res_resp.json()
                 status = data.get("status")
                 if status == "succeeded":
-                    # Prodia v2 returns image buffer directly or a link depending on model,
-                    # but usually it's a GET to the same job ID with an Accept header for images.
                     img_resp = await client.get(
                         f"https://inference.prodia.com/v2/job/{job_id}",
                         headers={**headers, "Accept": "image/jpeg"},
-                        timeout=60.0
+                        timeout=60.0,
                     )
                     img_resp.raise_for_status()
                     output_path.write_bytes(img_resp.content)
@@ -328,7 +332,119 @@ async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
     return None
 
 
+# ── Provider: Stable Horde (free community cluster, no key needed) ────────────
+
+async def _try_stable_horde(prompt: str, output_path: Path, seed: int) -> Path | None:
+    """Community GPU cluster — guest key built-in, register at aihorde.net for priority."""
+    import base64
+    key = os.environ.get("STABLE_HORDE_API_KEY", "0000000000")
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    payload = {
+        "prompt": prompt,
+        "params": {
+            "width": 768,
+            "height": 1344,  # closest SDXL bucket to 9:16
+            "steps": 25,
+            "sampler_name": "k_euler_a",
+            "n": 1,
+            "seed": str(seed),
+        },
+        "models": ["AlbedoBase XL (SDXL)"],
+        "r2": False,
+        "shared": False,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://stablehorde.net/api/v2/generate/async",
+                json=payload, headers=headers,
+            )
+            if resp.status_code not in (200, 202):
+                return None
+            job_id = resp.json().get("id")
+            if not job_id:
+                return None
+
+            for _ in range(60):  # poll up to 5 minutes (slow on guest key)
+                await asyncio.sleep(5)
+                check = await client.get(
+                    f"https://stablehorde.net/api/v2/generate/check/{job_id}",
+                    headers=headers,
+                )
+                if check.status_code != 200:
+                    continue
+                data = check.json()
+                if data.get("faulted"):
+                    return None
+                if not data.get("done"):
+                    continue
+                status = await client.get(
+                    f"https://stablehorde.net/api/v2/generate/status/{job_id}",
+                    headers=headers, timeout=60.0,
+                )
+                if status.status_code != 200:
+                    return None
+                gens = status.json().get("generations", [])
+                if not gens:
+                    return None
+                img_b64 = gens[0].get("img", "")
+                if not img_b64 or len(img_b64) < 100:
+                    return None
+                output_path.write_bytes(base64.b64decode(img_b64))
+                return output_path
+    except Exception:
+        return None
+    return None
+
+
+# ── Provider: Together AI (free FLUX.1-schnell tier) ─────────────────────────
+
+async def _try_together(prompt: str, output_path: Path, seed: int) -> Path | None:
+    """Returns path on success, None if no TOGETHER_API_KEY or error.
+    Uses FLUX.1-schnell-Free via Together AI's free tier.
+    """
+    import base64
+    key = os.environ.get("TOGETHER_API_KEY", "")
+    if not key:
+        return None
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = {
+        "model": "black-forest-labs/FLUX.1-schnell-Free",
+        "prompt": prompt,
+        "width": 1024,
+        "height": 1792,  # ~9:16
+        "steps": 4,
+        "n": 1,
+        "seed": seed,
+        "response_format": "b64_json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            resp = await client.post(
+                "https://api.together.xyz/v1/images/generations",
+                json=payload, headers=headers,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            images = data.get("data", [])
+            if not images:
+                return None
+            b64 = images[0].get("b64_json", "")
+            if not b64 or len(b64) < 100:
+                return None
+            output_path.write_bytes(base64.b64decode(b64))
+            return output_path
+    except Exception:
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
+
+_ALL_PROVIDERS = [
+    "bfl", "fal", "prodia", "pollinations", "huggingface", "stable_horde", "together",
+]
+
 
 async def generate_image(
     prompt: str,
@@ -339,11 +455,12 @@ async def generate_image(
     """Generate one image, trying providers in order, placeholder as last resort.
 
     Returns (path, is_placeholder). is_placeholder=True means all providers failed.
-    providers: list of provider names to try, in order. Defaults to all available.
-    Available: "bfl", "fal", "prodia", "pollinations", "huggingface"
+    providers: ordered list of provider names. Defaults to all available.
+    Available: "bfl", "fal", "prodia", "pollinations", "huggingface",
+               "stable_horde" (free, guest key built-in), "together" (TOGETHER_API_KEY)
     """
     if providers is None:
-        providers = ["bfl", "fal", "prodia", "pollinations", "huggingface"]
+        providers = _ALL_PROVIDERS
 
     enriched = _enrich_prompt(prompt)
     for provider in providers:
@@ -358,6 +475,10 @@ async def generate_image(
             result = await _try_pollinations(enriched, output_path, seed)
         elif provider == "huggingface":
             result = await _try_huggingface(enriched, output_path)
+        elif provider == "stable_horde":
+            result = await _try_stable_horde(enriched, output_path, seed)
+        elif provider == "together":
+            result = await _try_together(enriched, output_path, seed)
         if result is not None:
             return result, False
 
@@ -368,7 +489,7 @@ async def generate_images(
     prompts: list[str],
     out_dir: Path,
     providers: list[str] | None = None,
-    max_concurrent: int = 4, # Increased for paid providers
+    max_concurrent: int = 4,
     on_image_done: Optional[Callable[[int, bool], None]] = None,
 ) -> tuple[list[Path], int]:
     """Generate images for all prompts in parallel (up to max_concurrent at once).
@@ -377,8 +498,6 @@ async def generate_images(
     on_image_done(index, is_placeholder) is called as each image completes.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Adaptive concurrency: paid providers can handle more, free ones are throttled inside their methods
     sem = asyncio.Semaphore(max_concurrent)
 
     async def _gen(i: int, prompt: str) -> tuple[Path, bool]:

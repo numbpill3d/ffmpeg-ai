@@ -179,7 +179,9 @@ async def run_pipeline(
                 tracker.complete(s, "skipped (dry run)")
             return output_path
 
-        providers = image_providers or ["bfl", "fal", "prodia", "pollinations", "huggingface"]
+        providers = image_providers or [
+            "bfl", "fal", "prodia", "pollinations", "huggingface", "stable_horde", "together",
+        ]
 
         # ── 2+3. TTS + Images (Semantic Sync) ────────────────────────────────
         tts_dir = job_dir / "tts"
