@@ -1,7 +1,6 @@
 """Orchestrates the full Short generation pipeline."""
 import asyncio
 import json
-import math
 import os
 import random
 import re
@@ -280,6 +279,8 @@ async def run_pipeline(
         # 1. Create raw durations from audio parts
         raw_clip_durations = []
         for p_dur, n_imgs in part_mapping:
+            if n_imgs == 0:
+                continue
             avg = p_dur / n_imgs
             raw_clip_durations.extend([avg] * n_imgs)
 
@@ -351,7 +352,7 @@ async def run_pipeline(
             raw_video = tmp_dir / "raw.mp4"
             with_audio_path = tmp_dir / "with_audio.mp4"
 
-            concat_with_transitions(clips, clip_durations, raw_video)
+            concat_with_transitions(clips, clip_durations, raw_video, transition_duration=trans_d)
             merge_audio(raw_video, combined_audio, with_audio_path)
 
             # Apply hook overlay
@@ -458,19 +459,3 @@ def _pick_motions(n: int) -> list[str]:
     for _ in range(n - 1):
         result.append(random.choice([s for s in MOTION_STYLES if s != result[-1]]))
     return result
-
-
-def _energy_curve_durations(n: int, total_dur: float) -> list[float]:
-    """TikTok energy curve: fast at hook and outro, slower in the body."""
-    if n == 0:
-        return []
-    base = total_dur / n
-    raw: list[float] = []
-    for i in range(n):
-        pos = i / max(n - 1, 1)
-        arc = math.sin(math.pi * pos)
-        factor = 0.65 + arc * 0.55
-        jitter = random.uniform(0.90, 1.10)
-        raw.append(max(1.2, base * factor * jitter))
-    scale = total_dur / sum(raw)
-    return [d * scale for d in raw]
