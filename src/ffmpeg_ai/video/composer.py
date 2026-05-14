@@ -29,7 +29,12 @@ def get_audio_duration(audio_path: Path) -> float:
         str(audio_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    return float(result.stdout.strip())
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        raise RuntimeError(
+            f"ffprobe could not read duration from {audio_path}: {result.stderr.strip()}"
+        )
 
 
 # ── Ken Burns motion styles ───────────────────────────────────────────────────
@@ -354,7 +359,9 @@ def detect_beats(audio_path: Path, min_interval: float = 0.25) -> list[float]:
     return filtered
 
 
-def snap_to_beats(cut_times: list[float], beats: list[float], tolerance: float = 0.25) -> list[float]:
+def snap_to_beats(
+    cut_times: list[float], beats: list[float], tolerance: float = 0.25
+) -> list[float]:
     """Snap each cut time to the nearest beat within tolerance (no two cuts share a beat)."""
     if not beats:
         return cut_times

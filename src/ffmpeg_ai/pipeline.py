@@ -36,6 +36,25 @@ def _slug(topic: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", topic.lower().strip())[:48].strip("-") or "untitled"
 
 
+def _find_font() -> str:
+    """Return path to a bold sans-serif font, or empty string to use ffmpeg's default."""
+    candidates = [
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/DejaVuSans-Bold.ttf",
+    ]
+    return next((f for f in candidates if Path(f).exists()), "")
+
+
+def _escape_drawtext(text: str) -> str:
+    """Escape text for ffmpeg drawtext filter option value."""
+    text = text.replace("\\", "\\\\")
+    text = text.replace("'", "\\'")
+    text = text.replace(":", "\\:")
+    return text
+
+
 async def run_pipeline(
     topic: str,
     output_path: Path,
@@ -77,7 +96,7 @@ async def run_pipeline(
         shutil.rmtree(job_dir, ignore_errors=True)
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    stages = ["SCRIPT", "TTS", "IMAGES", "VIDEO", "CAPTIONS"]
+    stages = ["SCRIPT", "TTS", "IMAGES", "VIDEO", "CAPTIONS", "AMBIENCE"]
     if music_path and music_path.is_file():
         stages.append("MUSIC")
     stages.append("EXPORT")
@@ -103,16 +122,17 @@ async def run_pipeline(
             script_cache.write_text(json.dumps(script, indent=2))
             tracker.complete("SCRIPT", "generated new script")
 
-        # Adapter for old script format
-        if "hook" in script and isinstance(script["hook"], str):
-            script["hook"] = {"text": script["hook"], "visual_prompts": [topic]}
-        if "cta" in script and isinstance(script["cta"], str):
-            script["cta"] = {"text": script["cta"], "visual_prompts": [topic]}
-        for s in script["segments"]:
-            if "visual_prompts" not in s:
-                # migrate old 'visual' key
-                s["visual_prompts"] = [s.get("visual", topic)]
+        def _adapt_script(s: dict) -> dict:
+            if "hook" in s and isinstance(s["hook"], str):
+                s["hook"] = {"text": s["hook"], "visual_prompts": [topic]}
+            if "cta" in s and isinstance(s["cta"], str):
+                s["cta"] = {"text": s["cta"], "visual_prompts": [topic]}
+            for seg in s["segments"]:
+                if "visual_prompts" not in seg:
+                    seg["visual_prompts"] = [seg.get("visual", topic)]
+            return s
 
+        script = _adapt_script(script)
         hook = script["hook"]
         segments = script["segments"]
         cta = script["cta"]
@@ -137,8 +157,12 @@ async def run_pipeline(
                 tracker._live.stop()
             editor = os.environ.get("EDITOR", "nano")
             subprocess.run([editor, str(edit_file)])
-            script = json.loads(edit_file.read_text())
+            script = _adapt_script(json.loads(edit_file.read_text()))
             script_cache.write_text(json.dumps(script, indent=2))
+            # Re-bind locals so TTS uses the edited script
+            hook = script["hook"]
+            segments = script["segments"]
+            cta = script["cta"]
             if tracker._live:
                 tracker._live.start()
 
@@ -151,52 +175,52 @@ async def run_pipeline(
         providers = image_providers or ["bfl", "fal", "prodia", "pollinations", "huggingface"]
 
         # ── 2+3. TTS + Images (Semantic Sync) ────────────────────────────────
-        tts_dir        = job_dir / "tts"
-        img_dir        = job_dir / "images"
+        tts_dir = job_dir / "tts"
+        img_dir = job_dir / "images"
         combined_audio = job_dir / "narration.mp3"
-        
+
         tts_dir.mkdir(parents=True, exist_ok=True)
         img_dir.mkdir(parents=True, exist_ok=True)
 
-        tracker.start("TTS",    f"voice: {voice.split('-')[-1]}")
-        
+        tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
+
         async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
             # 1. Synthesize all parts
             hook_audio = tts_dir / "hook.mp3"
             await synthesize(hook["text"], hook_audio, voice=voice)
-            
+
             seg_audios = await synthesize_segments(segments, tts_dir, voice=voice)
-            
+
             cta_audio = tts_dir / "cta.mp3"
             await synthesize(cta["text"], cta_audio, voice=voice)
-            
+
             all_a = [hook_audio] + list(seg_audios) + [cta_audio]
             await asyncio.to_thread(concat_audio, all_a, combined_audio)
-            
+
             # 2. Map parts to visual prompts and measure durations
             timeline_prompts = []
-            part_mapping = [] # list of (duration, n_images)
-            
+            part_mapping = []  # list of (duration, n_images)
+
             h_dur = await asyncio.to_thread(get_audio_duration, hook_audio)
             timeline_prompts.extend(hook["visual_prompts"])
             part_mapping.append((h_dur, len(hook["visual_prompts"])))
-            
+
             for i, seg in enumerate(segments):
                 s_dur = await asyncio.to_thread(get_audio_duration, seg_audios[i])
                 timeline_prompts.extend(seg["visual_prompts"])
                 part_mapping.append((s_dur, len(seg["visual_prompts"])))
-                
+
             c_dur = await asyncio.to_thread(get_audio_duration, cta_audio)
             timeline_prompts.extend(cta["visual_prompts"])
             part_mapping.append((c_dur, len(cta["visual_prompts"])))
-            
+
             total_dur = sum(d for d, _ in part_mapping)
             tracker.complete("TTS", f"{total_dur:.1f}s")
             return combined_audio, total_dur, timeline_prompts, part_mapping
 
         # We must do TTS first to get durations, then Images
         combined_audio, total_dur, image_prompts, part_mapping = await _do_tts_and_sync()
-        
+
         n_total_images = len(image_prompts)
         tracker.start("IMAGES", f"{n_total_images} frames (synced)")
         tracker.set_image_count(n_total_images)
@@ -252,7 +276,7 @@ async def run_pipeline(
         for p_dur, n_imgs in part_mapping:
             avg = p_dur / n_imgs
             raw_clip_durations.extend([avg] * n_imgs)
-        
+
         # 2. Compensate for xfade transition overlaps
         # sum(clip_durations) must be total_dur + (n_clips - 1) * trans_d
         n_clips = len(images)
@@ -260,16 +284,13 @@ async def run_pipeline(
         total_overlap = (n_clips - 1) * trans_d
         extra_per_clip = total_overlap / n_clips
         clip_durations = [d + extra_per_clip for d in raw_clip_durations]
-        
+
         # 3. Limit to 58s
         if total_dur > 58.0:
             total_dur = 58.0
-            # Truncate timeline
-            current_v_sum = 0
+            current_v_sum = 0.0
             new_durations = []
             for d in clip_durations:
-                # We need to account for transitions in the limit check too, 
-                # but simplest is to just cap the sum.
                 if current_v_sum + d > 58.0 + total_overlap:
                     break
                 new_durations.append(d)
@@ -296,7 +317,7 @@ async def run_pipeline(
         tracker.start("VIDEO", f"{n_clips} clips  Ken Burns · xfade")
 
         with tempfile.TemporaryDirectory(prefix="ffai_") as tmp:
-            tmp_dir  = Path(tmp)
+            tmp_dir = Path(tmp)
             clip_dir = tmp_dir / "clips"
             clip_dir.mkdir()
             clips_dict: dict[int, Path] = {}
@@ -316,24 +337,28 @@ async def run_pipeline(
                 for idx, path in ex.map(_render_clip, range(n_clips)):
                     clips_dict[idx] = path
 
-            clips           = [clips_dict[i] for i in range(n_clips)]
-            raw_video       = tmp_dir / "raw.mp4"
+            clips = [clips_dict[i] for i in range(n_clips)]
+            raw_video = tmp_dir / "raw.mp4"
             with_audio_path = tmp_dir / "with_audio.mp4"
 
             concat_with_transitions(clips, clip_durations, raw_video)
             merge_audio(raw_video, combined_audio, with_audio_path)
-            
+
             # Apply hook overlay
             hook_text = hook["text"]
-            # Escape single quotes for ffmpeg
-            escaped_text = hook_text.replace("'", "\\'")
+            escaped_text = _escape_drawtext(hook_text)
+            font_path = _find_font()
+            fontfile_arg = f"fontfile={font_path}:" if font_path else ""
             hook_vf = (
-                f"drawtext=text='{escaped_text}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
-                f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:shadowx=2:shadowy=2:"
-                f"enable='between(t,0,3)'"
+                f"drawtext=text='{escaped_text}':{fontfile_arg}"
+                f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
+                f"shadowx=2:shadowy=2:enable='between(t,0,3)'"
             )
             captioned_hook = tmp_dir / "hooked.mp4"
-            cmd = ["ffmpeg", "-y", "-i", str(with_audio_path), "-vf", hook_vf, "-c:a", "copy", str(captioned_hook)]
+            cmd = [
+                "ffmpeg", "-y", "-i", str(with_audio_path),
+                "-vf", hook_vf, "-c:a", "copy", str(captioned_hook),
+            ]
             _run(cmd, "hook_overlay")
             tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
 
@@ -345,11 +370,11 @@ async def run_pipeline(
             else:
                 tracker.start("CAPTIONS", f"faster-whisper  [{caption_style}]")
                 try:
-                    ass_path      = tmp_dir / "captions.ass"
+                    ass_path = tmp_dir / "captions.ass"
                     subtitle_path = await asyncio.to_thread(
                         audio_to_ass, combined_audio, ass_path, style=caption_style,
                     )
-                    captioned     = tmp_dir / "captioned.mp4"
+                    captioned = tmp_dir / "captioned.mp4"
                     await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
                     tracker.complete("CAPTIONS", caption_style)
                     post_caption = captioned
@@ -359,13 +384,12 @@ async def run_pipeline(
 
             # ── 5a. Ambience ──────────────────────────────────────────────────
             tracker.start("AMBIENCE", "layered soundscapes")
-            # Mix in a subtle tech-hum loop at 5% volume
             final_audio_path = tmp_dir / "with_ambience.mp4"
             ambience_cmd = [
                 "ffmpeg", "-y", "-i", str(post_caption),
-                "-f", "lavfi", "-i", "aevalsrc=random(0.01)*0.05",
+                "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:r=44100",
                 "-filter_complex", "amix=inputs=2:duration=first",
-                "-c:v", "copy", "-c:a", "aac", str(final_audio_path)
+                "-c:v", "copy", "-c:a", "aac", str(final_audio_path),
             ]
             _run(ambience_cmd, "ambience_mix")
             tracker.complete("AMBIENCE", "tech-hum layer added")
@@ -398,6 +422,7 @@ async def run_pipeline(
         else ("AI (" + ", ".join(providers) + ")") if use_ai_images
         else "placeholder"
     )
+    placeholder_note = f"  ({placeholder_count} placeholder)" if placeholder_count else ""
     console.print(Panel(
         stats_table({
             "output":     str(output_path.resolve()),
@@ -405,7 +430,7 @@ async def run_pipeline(
             "elapsed":    f"{elapsed:.0f}s",
             "model":      model,
             "voice":      voice,
-            "images":     img_src + (f"  ({placeholder_count} placeholder)" if placeholder_count else ""),
+            "images":     img_src + placeholder_note,
             "style":      style or "default",
             "captions":   caption_style,
             "music":      music_path.name if music_path else "none",
@@ -432,8 +457,8 @@ def _energy_curve_durations(n: int, total_dur: float) -> list[float]:
     base = total_dur / n
     raw: list[float] = []
     for i in range(n):
-        pos    = i / max(n - 1, 1)
-        arc    = math.sin(math.pi * pos)
+        pos = i / max(n - 1, 1)
+        arc = math.sin(math.pi * pos)
         factor = 0.65 + arc * 0.55
         jitter = random.uniform(0.90, 1.10)
         raw.append(max(1.2, base * factor * jitter))

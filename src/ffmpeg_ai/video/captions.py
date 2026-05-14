@@ -35,7 +35,9 @@ def audio_to_ass(
     cfg = _STYLE_CONFIGS.get(style, _STYLE_CONFIGS["karaoke"])
 
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(audio_path), beam_size=5, word_timestamps=True)
+    segments, _ = model.transcribe(
+        str(audio_path), beam_size=5, word_timestamps=True, language="en"
+    )
 
     words: list[tuple[float, float, str]] = []
     for seg in segments:
@@ -102,7 +104,7 @@ def audio_to_srt(audio_path: Path, output_path: Path, model_size: str = "base") 
     from faster_whisper import WhisperModel
 
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(audio_path), beam_size=5)
+    segments, _ = model.transcribe(str(audio_path), beam_size=5, language="en")
 
     srt_lines: list[str] = []
     for i, seg in enumerate(segments, 1):
