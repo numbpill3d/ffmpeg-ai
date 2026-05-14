@@ -389,6 +389,7 @@ def extract_thumbnail(video_path: Path, output_path: Path, position_pct: float =
 def _escape_drawtext(text: str) -> str:
     """Escape text for ffmpeg drawtext filter option value."""
     text = text.replace("\\", "\\\\")
+    text = text.replace("%", "%%")   # prevent drawtext expansion in normal mode
     text = text.replace("'", "\\'")
     text = text.replace(":", "\\:")
     return text
