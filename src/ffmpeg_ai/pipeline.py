@@ -115,13 +115,23 @@ async def run_pipeline(
             tracker.complete("SCRIPT", "generated new script")
 
         def _adapt_script(s: dict) -> dict:
+            def _fix_vp(obj: dict, fallback: str) -> None:
+                vp = obj.get("visual_prompts")
+                if not isinstance(vp, list):
+                    obj["visual_prompts"] = [vp] if isinstance(vp, str) else [fallback]
+
             if "hook" in s and isinstance(s["hook"], str):
                 s["hook"] = {"text": s["hook"], "visual_prompts": [topic]}
+            elif isinstance(s.get("hook"), dict):
+                _fix_vp(s["hook"], topic)
+
             if "cta" in s and isinstance(s["cta"], str):
                 s["cta"] = {"text": s["cta"], "visual_prompts": [topic]}
-            for seg in s["segments"]:
-                if "visual_prompts" not in seg:
-                    seg["visual_prompts"] = [seg.get("visual", topic)]
+            elif isinstance(s.get("cta"), dict):
+                _fix_vp(s["cta"], topic)
+
+            for seg in s.get("segments", []):
+                _fix_vp(seg, topic)
             return s
 
         script = _adapt_script(script)
