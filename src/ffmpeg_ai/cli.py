@@ -22,8 +22,8 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 
-_STYLE_CHOICES    = list(STYLE_PRESETS.keys())
-_CAPTION_CHOICES  = ["karaoke", "plain", "bold-center"]
+_STYLE_CHOICES = list(STYLE_PRESETS.keys())
+_CAPTION_CHOICES = ["karaoke", "plain", "bold-center"]
 
 
 @app.callback()
@@ -34,66 +34,89 @@ def main(ctx: typer.Context):
 
     print_banner()
 
-    cmd_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
-    cmd_table.add_column("cmd",  style="bold cyan", no_wrap=True)
+    cmd_table = Table(
+        box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2)
+    )
+    cmd_table.add_column("cmd", style="bold cyan", no_wrap=True)
     cmd_table.add_column("desc", style="white")
-    cmd_table.add_row("generate", "generate a YouTube Short from a topic  [dim](main command)[/]")
-    cmd_table.add_row("batch",    "generate multiple Shorts from a topics file")
-    cmd_table.add_row("models",   "list available free OpenRouter models")
-    cmd_table.add_row("voices",   "list available TTS voices")
-    cmd_table.add_row("providers","list image generation providers + auth status")
-    console.print(Panel(cmd_table, title="[bold white]commands[/]", border_style="bright_black", box=box.ROUNDED))
+    cmd_table.add_row("generate",  "generate a YouTube Short from a topic  [dim](main command)[/]")
+    cmd_table.add_row("batch",     "generate multiple Shorts from a topics file")
+    cmd_table.add_row("models",    "list available free OpenRouter models")
+    cmd_table.add_row("voices",    "list available TTS voices")
+    cmd_table.add_row("providers", "list image generation providers + auth status")
+    console.print(Panel(
+        cmd_table, title="[bold white]commands[/]",
+        border_style="bright_black", box=box.ROUNDED,
+    ))
 
-    arg_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=True, padding=(0, 2))
-    arg_table.add_column("argument",    style="bold cyan",  no_wrap=True)
-    arg_table.add_column("type",        style="dim white",  no_wrap=True)
-    arg_table.add_column("default",     style="yellow",     no_wrap=True)
+    arg_table = Table(
+        box=box.SIMPLE, border_style="bright_black", show_header=True, padding=(0, 2)
+    )
+    arg_table.add_column("argument",    style="bold cyan", no_wrap=True)
+    arg_table.add_column("type",        style="dim white", no_wrap=True)
+    arg_table.add_column("default",     style="yellow",    no_wrap=True)
     arg_table.add_column("description", style="white")
 
-    arg_table.add_row("TOPIC",               "str",  "(required)", "Topic or idea for the Short")
-    arg_table.add_row("-o / --output",        "path", "~/Videos/ffmpeg-ai/<ts>.mp4", "Output file path")
-    arg_table.add_row("-d / --duration",      "int",  "45",         "Target duration in seconds (max 58)")
-    arg_table.add_row("-m / --model",         "str",  "llama-3.3-70b:free", "OpenRouter model ID")
-    arg_table.add_row("-v / --voice",         "str",  "en-female",  f"TTS voice: {', '.join(VOICES.keys())}")
-    arg_table.add_row("-M / --music",         "path", "none",       "Background music (MP3/WAV), auto-ducked")
-    arg_table.add_row("-I / --images-dir",    "path", "none",       "Use images from this directory")
-    arg_table.add_row("--script",             "path", "none",       "Load script JSON from file (skips LLM)")
-    arg_table.add_row("--edit-script",        "flag", "off",        "Open generated script in $EDITOR before rendering")
-    arg_table.add_row("--style",              "str",  "none",       f"Tone preset: {', '.join(_STYLE_CHOICES)}")
-    arg_table.add_row("--caption-style",      "str",  "karaoke",    f"Caption style: {', '.join(_CAPTION_CHOICES)}")
-    arg_table.add_row("--providers",          "str",  "pollinations,huggingface", "Image provider order")
-    arg_table.add_row("--no-ai-images",       "flag", "off",        "Disable AI image generation")
-    arg_table.add_row("--thumbnail/--no-thumbnail", "flag", "on",  "Extract thumbnail JPEG alongside output")
-    arg_table.add_row("--no-captions",          "flag", "off",        "Skip whisper transcription and caption burn")
-    arg_table.add_row("--fresh",              "flag", "off",        "Ignore cached job data, start from scratch")
-    arg_table.add_row("-q / --quiet",         "flag", "off",        "Minimal output — one line per stage")
-    arg_table.add_row("--dry-run",            "flag", "off",        "Generate script only, no video rendered")
-    console.print(Panel(arg_table, title="[bold white]generate — arguments[/]", border_style="bright_black", box=box.ROUNDED))
+    arg_table.add_row("TOPIC", "str", "(required)", "Topic or idea for the Short")
+    arg_table.add_row("-o / --output", "path", "~/Videos/…", "Output file path")
+    arg_table.add_row("-d / --duration", "int", "45", "Target duration in seconds (max 58)")
+    arg_table.add_row("-m / --model", "str", "llama-3.3-70b:free", "OpenRouter model ID")
+    arg_table.add_row("-v / --voice", "str", "en-female", "TTS voice (see: voices command)")
+    arg_table.add_row("-M / --music", "path", "none", "Background music (MP3/WAV), auto-ducked")
+    arg_table.add_row("-I / --images-dir", "path", "none", "Use images from this directory")
+    arg_table.add_row("--script", "path", "none", "Load script JSON (skips LLM)")
+    arg_table.add_row("--edit-script", "flag", "off", "Open script in $EDITOR before render")
+    arg_table.add_row("--style", "str", "none", f"Tone preset: {', '.join(_STYLE_CHOICES)}")
+    arg_table.add_row("--caption-style", "str", "karaoke", ", ".join(_CAPTION_CHOICES))
+    arg_table.add_row("--providers", "str", "all", "Image provider order (comma-separated)")
+    arg_table.add_row("--no-ai-images", "flag", "off", "Disable AI image generation")
+    arg_table.add_row("--thumbnail/--no-thumbnail", "flag", "on", "Extract thumbnail JPEG")
+    arg_table.add_row("--no-captions", "flag", "off", "Skip whisper + caption burn")
+    arg_table.add_row("--fresh", "flag", "off", "Ignore cache, start from scratch")
+    arg_table.add_row("-q / --quiet", "flag", "off", "Minimal output — one line per stage")
+    arg_table.add_row("--dry-run", "flag", "off", "Script only, no video rendered")
+    console.print(Panel(
+        arg_table, title="[bold white]generate — arguments[/]",
+        border_style="bright_black", box=box.ROUNDED,
+    ))
 
-    ex_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
+    ex_table = Table(
+        box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2)
+    )
     ex_table.add_column("label", style="dim white",  no_wrap=True, min_width=22)
     ex_table.add_column("cmd",   style="bold green")
 
-    ex_table.add_row("basic",              'ffmpeg-ai generate "5 facts about black holes"')
-    ex_table.add_row("dramatic style",     'ffmpeg-ai generate "deep sea creatures" --style dramatic')
-    ex_table.add_row("listicle",           'ffmpeg-ai generate "productivity hacks" --style listicle')
+    ex_table.add_row("basic", 'ffmpeg-ai generate "5 facts about black holes"')
+    ex_table.add_row("dramatic style", 'ffmpeg-ai generate "deep sea creatures" --style dramatic')
+    ex_table.add_row("listicle", 'ffmpeg-ai generate "productivity hacks" --style listicle')
     ex_table.add_row("edit before render", 'ffmpeg-ai generate "mars colonization" --edit-script')
-    ex_table.add_row("resume job",         'ffmpeg-ai generate "ancient rome"  [dim](re-uses cached images/audio)[/]')
-    ex_table.add_row("fresh run",          'ffmpeg-ai generate "ancient rome" --fresh')
-    ex_table.add_row("load saved script",  'ffmpeg-ai generate "ancient rome" --script ~/.cache/ffmpeg-ai/jobs/ancient-rome/script.json')
-    ex_table.add_row("plain captions",     'ffmpeg-ai generate "stoic tips" --caption-style plain')
-    ex_table.add_row("no thumbnail",       'ffmpeg-ai generate "test" --no-thumbnail -o test.mp4')
-    ex_table.add_row("quiet batch-friendly",'ffmpeg-ai generate "quantum computing" -q -o out/q.mp4')
-    ex_table.add_row("batch",              'ffmpeg-ai batch topics.txt -o ~/Videos/batch/')
-    console.print(Panel(ex_table, title="[bold white]examples[/]", border_style="bright_black", box=box.ROUNDED))
+    ex_table.add_row("resume job", 'ffmpeg-ai generate "ancient rome"  [dim](re-uses cache)[/]')
+    ex_table.add_row("fresh run", 'ffmpeg-ai generate "ancient rome" --fresh')
+    ex_table.add_row("load saved script", 'ffmpeg-ai generate "topic" --script ~/.cache/…/script.json')  # noqa: E501
+    ex_table.add_row("plain captions", 'ffmpeg-ai generate "stoic tips" --caption-style plain')
+    ex_table.add_row("no thumbnail", 'ffmpeg-ai generate "test" --no-thumbnail -o test.mp4')
+    ex_table.add_row("quiet / batch", 'ffmpeg-ai generate "quantum computing" -q -o out/q.mp4')
+    ex_table.add_row("batch", 'ffmpeg-ai batch topics.txt -o ~/Videos/batch/')
+    console.print(Panel(
+        ex_table, title="[bold white]examples[/]",
+        border_style="bright_black", box=box.ROUNDED,
+    ))
 
-    env_table = Table(box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2))
+    env_table = Table(
+        box=box.SIMPLE, border_style="bright_black", show_header=False, padding=(0, 2)
+    )
     env_table.add_column("var",  style="bold cyan", no_wrap=True)
     env_table.add_column("desc", style="white")
-    env_table.add_row("OPENROUTER_API_KEY", "required for LLM script generation  [dim](free tier)[/]")
+    env_table.add_row("OPENROUTER_API_KEY", "required — LLM script generation  [dim](free tier)[/]")
+    env_table.add_row("BFL_API_KEY",        "optional — enables Black Forest Labs image provider")
+    env_table.add_row("FAL_KEY",            "optional — enables Fal.ai image provider")
+    env_table.add_row("PRODIA_TOKEN",       "optional — enables Prodia image provider")
     env_table.add_row("HF_TOKEN",           "optional — enables HuggingFace image provider")
     env_table.add_row("EDITOR",             "editor for --edit-script  [dim](default: nano)[/]")
-    console.print(Panel(env_table, title="[bold white]env vars  (.env supported)[/]", border_style="bright_black", box=box.ROUNDED))
+    console.print(Panel(
+        env_table, title="[bold white]env vars  (.env supported)[/]",
+        border_style="bright_black", box=box.ROUNDED,
+    ))
 
 
 @app.command()
@@ -108,28 +131,47 @@ def generate(
     no_ai_images: bool = typer.Option(False, "--no-ai-images"),
     providers: Optional[str] = typer.Option(None, "--providers"),
     music: Optional[Path] = typer.Option(None, "--music", "-M"),
-    script: Optional[Path] = typer.Option(None, "--script", help="Load script JSON from file (skips LLM)"),
-    edit_script: bool = typer.Option(False, "--edit-script", help="Open script in $EDITOR before rendering"),
-    fresh: bool = typer.Option(False, "--fresh", help="Ignore cached job data and start from scratch"),
+    script: Optional[Path] = typer.Option(
+        None, "--script", help="Load script JSON from file (skips LLM)"
+    ),
+    edit_script: bool = typer.Option(
+        False, "--edit-script", help="Open script in $EDITOR before rendering"
+    ),
+    fresh: bool = typer.Option(
+        False, "--fresh", help="Ignore cached job data and start from scratch"
+    ),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Minimal output"),
-    thumbnail: bool = typer.Option(True, "--thumbnail/--no-thumbnail", help="Extract thumbnail alongside output"),
-    style: Optional[str] = typer.Option(None, "--style", help=f"Tone preset: {', '.join(_STYLE_CHOICES)}"),
-    caption_style: str = typer.Option("karaoke", "--caption-style", help=f"Caption style: {', '.join(_CAPTION_CHOICES)}"),
-    no_captions: bool = typer.Option(False, "--no-captions", help="Skip transcription and caption burning"),
+    thumbnail: bool = typer.Option(
+        True, "--thumbnail/--no-thumbnail", help="Extract thumbnail alongside output"
+    ),
+    style: Optional[str] = typer.Option(
+        None, "--style", help=f"Tone preset: {', '.join(_STYLE_CHOICES)}"
+    ),
+    caption_style: str = typer.Option(
+        "karaoke", "--caption-style", help=f"Caption style: {', '.join(_CAPTION_CHOICES)}"
+    ),
+    no_captions: bool = typer.Option(
+        False, "--no-captions", help="Skip transcription and caption burning"
+    ),
 ):
     """[bold cyan]Generate a YouTube Short from a topic.[/]"""
     print_banner()
 
     if not os.environ.get("OPENROUTER_API_KEY", "") and script is None:
-        console.print("[bold red]error:[/] OPENROUTER_API_KEY not set — add it to .env or export it")
+        console.print("[bold red]error:[/] OPENROUTER_API_KEY not set — add to .env or export it")
         raise typer.Exit(1)
 
     if style and style not in _STYLE_CHOICES:
-        console.print(f"[bold red]error:[/] unknown style '{style}'. choices: {', '.join(_STYLE_CHOICES)}")
+        console.print(
+            f"[bold red]error:[/] unknown style '{style}'. choices: {', '.join(_STYLE_CHOICES)}"
+        )
         raise typer.Exit(1)
 
     if caption_style not in _CAPTION_CHOICES:
-        console.print(f"[bold red]error:[/] unknown caption-style '{caption_style}'. choices: {', '.join(_CAPTION_CHOICES)}")
+        console.print(
+            f"[bold red]error:[/] unknown caption-style '{caption_style}'."
+            f" choices: {', '.join(_CAPTION_CHOICES)}"
+        )
         raise typer.Exit(1)
 
     if images_dir is not None and not images_dir.is_dir():
@@ -177,8 +219,12 @@ def generate(
 
 @app.command()
 def batch(
-    topics_file: Path = typer.Argument(..., help="Text file with one topic per line (# lines are comments)"),
-    output_dir: Optional[Path] = typer.Option(None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"),
+    topics_file: Path = typer.Argument(
+        ..., help="Text file with one topic per line (# lines are comments)"
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"
+    ),
     duration: int = typer.Option(45, "-d", "--duration"),
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
@@ -219,9 +265,9 @@ def batch(
     for i, topic in enumerate(topics, 1):
         console.print(f"\n[bold cyan]── {i}/{len(topics)}: {topic} ──[/]")
         import datetime
-        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
-        out  = out_dir / f"{ts}_{slug}.mp4"
+        out = out_dir / f"{ts}_{slug}.mp4"
         try:
             asyncio.run(run_pipeline(
                 topic=topic,
@@ -272,9 +318,20 @@ def providers():
     t.add_column("Provider",      style="cyan")
     t.add_column("Auth required", style="white")
     t.add_column("Status",        style="white")
-    hf_key = os.environ.get("HF_TOKEN", "")
-    t.add_row("pollinations", "none",     "[green]ready[/]")
-    t.add_row("huggingface",  "HF_TOKEN", "[green]ready[/]" if hf_key else "[dim]set HF_TOKEN to enable[/]")
+
+    bfl_key    = os.environ.get("BFL_API_KEY", "")
+    fal_key    = os.environ.get("FAL_KEY", "")
+    prodia_key = os.environ.get("PRODIA_TOKEN", "")
+    hf_key     = os.environ.get("HF_TOKEN", "")
+
+    def _status(key: str) -> str:
+        return "[green]ready[/]" if key else "[dim]key not set[/]"
+
+    t.add_row("bfl",          "BFL_API_KEY",  _status(bfl_key))
+    t.add_row("fal",          "FAL_KEY",      _status(fal_key))
+    t.add_row("prodia",       "PRODIA_TOKEN", _status(prodia_key))
+    t.add_row("pollinations", "none",         "[green]ready[/]")
+    t.add_row("huggingface",  "HF_TOKEN",     _status(hf_key))
     console.print(t)
 
 

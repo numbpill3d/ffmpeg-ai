@@ -156,6 +156,8 @@ def concat_with_transitions(
     transition_duration: float | None = None,
 ) -> Path:
     """Concatenate video clips with random xfade transitions between each pair."""
+    if len(video_paths) == 0:
+        raise ValueError("concat_with_transitions requires at least one clip")
     if len(video_paths) == 1:
         shutil.copy2(video_paths[0], output_path)
         return output_path
@@ -384,7 +386,12 @@ def extract_thumbnail(video_path: Path, output_path: Path, position_pct: float =
         "-of", "default=noprint_wrappers=1:nokey=1", str(video_path),
     ]
     result = subprocess.run(dur_cmd, capture_output=True, text=True)
-    duration = float(result.stdout.strip())
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        raise RuntimeError(
+            f"ffprobe could not read duration from {video_path}: {result.stderr.strip()}"
+        )
     ts = duration * position_pct
     cmd = [
         "ffmpeg", "-y", "-ss", str(ts), "-i", str(video_path),

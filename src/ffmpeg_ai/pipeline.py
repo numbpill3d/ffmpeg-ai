@@ -280,6 +280,8 @@ async def run_pipeline(
         # 2. Compensate for xfade transition overlaps
         # sum(clip_durations) must be total_dur + (n_clips - 1) * trans_d
         n_clips = len(images)
+        if n_clips == 0:
+            raise RuntimeError("no images were generated — cannot produce video")
         trans_d = min(0.4, min(raw_clip_durations) * 0.25) if n_clips > 1 else 0
         total_overlap = (n_clips - 1) * trans_d
         extra_per_clip = total_overlap / n_clips
