@@ -23,7 +23,8 @@ STYLE_PRESETS: dict[str, str] = {
         "Structure: countdown or ranked list with a payoff at the end."
     ),
     "documentary": (
-        "Tone: journalistic and reflective, like a mini-documentary. Deliberate pacing with moments to breathe. "
+        "Tone: journalistic and reflective, like a mini-documentary. "
+        "Deliberate pacing with moments to breathe. "
         "Visuals: naturalistic, observational, muted colour palette. "
         "Structure: context → story → insight."
     ),
@@ -31,13 +32,13 @@ STYLE_PRESETS: dict[str, str] = {
 
 # Free models ranked by quality/speed (diverse providers to avoid single-provider rate limits)
 FREE_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",           # Meta, 128k ctx, reliable
-    "nousresearch/hermes-3-llama-3.1-405b:free",        # Nous, 405B, high quality
-    "openai/gpt-oss-120b:free",                         # OpenAI infra, 131k ctx
-    "mistralai/mistral-small-3.1-24b-instruct:free",    # Mistral, 128k ctx
-    "nvidia/nemotron-3-super-120b-a12b:free",           # NVIDIA, 262k ctx
-    "qwen/qwen3-next-80b-a3b-instruct:free",            # Alibaba, 80B
-    "meta-llama/llama-3.2-3b-instruct:free",            # fast fallback (small)
+    "meta-llama/llama-3.3-70b-instruct:free",        # Meta, 128k ctx, reliable
+    "nousresearch/hermes-3-llama-3.1-405b:free",     # Nous, 405B, high quality
+    "openai/gpt-oss-120b:free",                      # OpenAI infra, 131k ctx
+    "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral, 128k ctx
+    "nvidia/nemotron-3-super-120b-a12b:free",        # NVIDIA, 262k ctx
+    "qwen/qwen3-next-80b-a3b-instruct:free",         # Alibaba, 80B
+    "meta-llama/llama-3.2-3b-instruct:free",         # fast fallback (small)
 ]
 
 
@@ -53,17 +54,14 @@ async def generate_script(
     topic: str,
     duration: int = 45,
     model: str = FREE_MODELS[0],
-    n_images: int | None = None,
     style: str | None = None,
 ) -> dict:
     """Try model, fall back through FREE_MODELS list on rate-limit or null response."""
-    if n_images is None:
-        n_images = max(12, int(duration / 2.2))
     models_to_try = [model] + [m for m in FREE_MODELS if m != model]
-    last_err = None
+    last_err: Exception | None = None
     for m in models_to_try:
         try:
-            result = await _generate_script(topic, duration=duration, model=m, n_images=n_images, style=style)
+            result = await _generate_script(topic, duration=duration, model=m, style=style)
             if result is not None:
                 return result
             last_err = RuntimeError(f"Model {m} returned empty content")
@@ -71,41 +69,49 @@ async def generate_script(
             import json as _json
             msg = str(e).lower()
             is_rate = any(x in msg for x in ("429", "rate", "temporarily", "overloaded"))
-            is_retriable = isinstance(e, _json.JSONDecodeError) or is_rate or any(x in msg for x in (
+            _retriable_phrases = (
                 "404", "400", "upstream", "provider", "no endpoints",
                 "unterminated", "jsondecode", "bad request",
                 "developer instruction", "invalid_argument",
                 "timeout", "timed out", "connection",
-            ))
+            )
+            is_retriable = (
+                isinstance(e, _json.JSONDecodeError)
+                or is_rate
+                or any(x in msg for x in _retriable_phrases)
+            )
             if is_retriable:
                 last_err = e
                 if is_rate:
                     await asyncio.sleep(8)
                 continue
             raise
-    raise last_err
+    raise last_err or RuntimeError("all models exhausted without a usable response")
 
 
 async def _generate_script(
     topic: str,
     duration: int = 45,
     model: str = FREE_MODELS[0],
-    n_images: int = 12,
     style: str | None = None,
 ) -> dict:
     client = get_client()
     system = (
         "You are an expert YouTube Shorts scriptwriter and visual creative director. "
-        "You craft emotionally compelling, viral vertical video scripts with precise cinematic visual direction. "
+        "You craft emotionally compelling, viral vertical video scripts "
+        "with precise cinematic visual direction. "
         "Output strict JSON only — no markdown fences, no extra text, no comments."
     )
     if style and style in STYLE_PRESETS:
-        system += f"\n\nSTYLE DIRECTIVE — apply this tone and structure throughout:\n{STYLE_PRESETS[style]}"
+        system += (
+            f"\n\nSTYLE DIRECTIVE — apply this tone and structure throughout:"
+            f"\n{STYLE_PRESETS[style]}"
+        )
 
-    # YouTube Shorts are best under 50s to avoid the 60s hard limit and allow for overhead.
+    # YouTube Shorts are best under 50s to avoid the 60s hard limit.
     target_dur = min(duration, 50)
     n_segments = max(4, target_dur // 8)
-    
+
     user = f"""Write a YouTube Short script about: "{topic}"
 
 Return JSON with exactly this shape:
@@ -125,13 +131,13 @@ Return JSON with exactly this shape:
     }}
   ],
   "cta": {{
-    "text": "urgent closing CTA — max 12 words, MUST end with a controversial question to drive comments",
+    "text": "urgent closing CTA — max 12 words, end with a question to drive comments",
     "visual_prompts": ["AI image prompt for the CTA"]
   }},
   "viral_package": {{
     "hashtags": ["#tag1", "#tag2", "#tag3"],
     "description": "100-character description for upload",
-    "thumbnail_prompt": "High-contrast visual prompt for a YouTube Short thumbnail, bold text, viral style"
+    "thumbnail_prompt": "High-contrast thumbnail prompt, bold text, viral style"
   }}
 }}
 
@@ -140,13 +146,13 @@ Requirements:
 - Total narration word count MUST be under 130 words.
 - Each segment MUST have 2 distinct "visual_prompts".
 - Hook and CTA MUST each have 1 distinct "visual_prompts".
-- The script MUST be a complete story that logically concludes with a question in the CTA to drive engagement.
+- Script MUST conclude with a question in the CTA to drive comments.
 - Script language: active voice, second person ("you"), present tense."""
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.7, # Lowered for more consistency
+        temperature=0.7,
         max_tokens=3500,
         timeout=60,
     )

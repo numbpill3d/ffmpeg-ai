@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -156,7 +157,12 @@ async def run_pipeline(
             if tracker._live:
                 tracker._live.stop()
             editor = os.environ.get("EDITOR", "nano")
-            subprocess.run([editor, str(edit_file)])
+            try:
+                subprocess.run([editor, str(edit_file)])
+            except FileNotFoundError:
+                raise RuntimeError(
+                    f"editor not found: {editor!r} — set $EDITOR to an installed editor"
+                )
             script = _adapt_script(json.loads(edit_file.read_text()))
             script_cache.write_text(json.dumps(script, indent=2))
             # Re-bind locals so TTS uses the edited script
@@ -324,6 +330,7 @@ async def run_pipeline(
             clip_dir.mkdir()
             clips_dict: dict[int, Path] = {}
             done_clips = [0]
+            _clip_lock = threading.Lock()
 
             def _render_clip(idx: int) -> tuple[int, Path]:
                 path = image_to_video(
@@ -331,8 +338,9 @@ async def run_pipeline(
                     clip_dir / f"clip_{idx:03d}.mp4",
                     motion=motions[idx],
                 )
-                done_clips[0] += 1
-                tracker.update("VIDEO", done_clips[0], n_clips)
+                with _clip_lock:
+                    done_clips[0] += 1
+                    tracker.update("VIDEO", done_clips[0], n_clips)
                 return idx, path
 
             with ThreadPoolExecutor(max_workers=4) as ex:

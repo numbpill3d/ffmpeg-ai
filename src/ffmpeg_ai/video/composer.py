@@ -45,25 +45,23 @@ MOTION_STYLES = [
 ]
 
 def _kenburns_filter(motion: str, duration: float, w: int = WIDTH, h: int = HEIGHT) -> str:
-    d = int(duration * FPS)
+    d = max(int(duration * FPS), 1)  # clamp to 1 — pan formulas use d as divisor
     # Rhythmic Pop-in: zoom very fast for the first 0.5s then ease
     if motion == "pop_in":
-        zoom_speed = 0.4 / max(d, 1)
+        zoom_speed = 0.4 / d
         return (
             f"zoompan=z='min(zoom+{zoom_speed:.6f},1.3)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={w}x{h}:fps={FPS}"
         )
 
     # Scale step so zoom travels full 0.2 range regardless of clip length
-    step = 0.2 / max(d, 1)
+    step = 0.2 / d
     step6 = f"{step:.6f}"
-    # ... (other motions)
     if motion == "zoom_in":
         return (
             f"zoompan=z='min(zoom+{step6},1.2)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":d={d}:s={w}x{h}:fps={FPS}"
         )
-    # ...
 
     if motion == "zoom_out":
         return (
