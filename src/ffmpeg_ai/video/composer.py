@@ -421,7 +421,7 @@ def add_ambience(video_path: Path, output_path: Path) -> Path:
     """Mix a low-level white-noise ambience layer into the audio track."""
     cmd = [
         "ffmpeg", "-y", "-i", str(video_path),
-        "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:r=44100",
+        "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:s=44100",
         "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first[aout]",
         "-map", "0:v", "-map", "[aout]",
         "-c:v", "copy", "-c:a", "aac", str(output_path),
