@@ -22,6 +22,3 @@ SHORTS_VIDEO_ARGS = [
     "-ac", "2",
     "-movflags", "+faststart",
 ]
-
-def clamp_duration(seconds: float) -> float:
-    return min(seconds, MAX_DURATION)

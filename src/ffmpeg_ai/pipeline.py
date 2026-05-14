@@ -399,7 +399,8 @@ async def run_pipeline(
             ambience_cmd = [
                 "ffmpeg", "-y", "-i", str(post_caption),
                 "-f", "lavfi", "-i", "aevalsrc=random(0)*0.05:c=stereo:r=44100",
-                "-filter_complex", "amix=inputs=2:duration=first",
+                "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac", str(final_audio_path),
             ]
             _run(ambience_cmd, "ambience_mix")

@@ -1,16 +1,11 @@
 """Rich live pipeline display and stats widgets."""
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
-from rich.progress import (
-    Progress, SpinnerColumn, BarColumn, TextColumn,
-    TimeElapsedColumn, TaskProgressColumn,
-)
 from rich.table import Table
 from rich import box
 
@@ -186,23 +181,3 @@ def stats_table(data: dict[str, str]) -> Table:
     for k, v in data.items():
         t.add_row(k, v)
     return t
-
-
-@contextmanager
-def pipeline_progress(title: str = "Working"):
-    """Legacy single-stage progress bar (used outside full pipeline context)."""
-    prog = Progress(
-        SpinnerColumn(spinner_name="dots2", style="cyan"),
-        TextColumn("[bold white]{task.description}"),
-        BarColumn(bar_width=32, style="cyan", complete_style="bright_cyan"),
-        TaskProgressColumn(),
-        TimeElapsedColumn(),
-        console=console,
-        transient=False,
-    )
-    with Live(
-        Panel(prog, title=f"[bold cyan]{title}[/]", border_style="cyan", box=box.ROUNDED),
-        console=console,
-        refresh_per_second=12,
-    ):
-        yield prog
