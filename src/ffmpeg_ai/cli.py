@@ -143,9 +143,7 @@ def generate(
         False, "--fresh", help="Ignore cached job data and start from scratch"
     ),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Minimal output"),
-    thumbnail: bool = typer.Option(
-        True, "--thumbnail/--no-thumbnail", help="Extract thumbnail alongside output"
-    ),
+    no_thumbnail: bool = typer.Option(False, "--no-thumbnail", help="Skip thumbnail extraction"),
     style: Optional[str] = typer.Option(
         None, "--style", help=f"Tone preset: {', '.join(_STYLE_CHOICES)}"
     ),
@@ -212,7 +210,7 @@ def generate(
         edit_script=edit_script,
         fresh=fresh,
         quiet=quiet,
-        thumbnail=thumbnail,
+        thumbnail=not no_thumbnail,
         style=style,
         caption_style=caption_style,
         no_captions=no_captions,
@@ -232,7 +230,7 @@ def batch(
     voice: str = typer.Option("en-female", "-v", "--voice"),
     style: Optional[str] = typer.Option(None, "--style"),
     caption_style: str = typer.Option("karaoke", "--caption-style"),
-    thumbnail: bool = typer.Option(True, "--thumbnail/--no-thumbnail"),
+    no_thumbnail: bool = typer.Option(False, "--no-thumbnail"),
     fresh: bool = typer.Option(False, "--fresh"),
     quiet: bool = typer.Option(False, "-q", "--quiet"),
 ):
@@ -279,7 +277,7 @@ def batch(
                 voice=selected_voice,
                 style=style,
                 caption_style=caption_style,
-                thumbnail=thumbnail,
+                thumbnail=not no_thumbnail,
                 fresh=fresh,
                 quiet=quiet,
             ))
