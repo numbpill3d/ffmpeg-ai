@@ -153,7 +153,7 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
     }
 
     for model in _HF_MODELS:
-        url = f"https://api-inference.huggingface.co/models/{model}"
+        url = f"https://router.huggingface.co/hf-inference/models/{model}"
         for attempt in range(2):
             try:
                 async with httpx.AsyncClient(timeout=90.0) as client:
@@ -188,8 +188,8 @@ async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
     headers = {"x-key": key, "Content-Type": "application/json"}
     payload = {
         "prompt": prompt,
-        "width": IMG_WIDTH,
-        "height": IMG_HEIGHT,
+        "width": 768,    # BFL max height is 1440; use 768x1344 (~9:16, multiples of 32)
+        "height": 1344,
         "seed": seed,
         "prompt_upsampling": False,
         "safety_tolerance": 3,
