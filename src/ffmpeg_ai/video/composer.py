@@ -135,14 +135,15 @@ def image_to_video(
 
 # ── Concat ────────────────────────────────────────────────────────────────────
 
-# zoomin weighted 4x — it's the TikTok zoom-punch feel
 _TRANSITION_TYPES = [
-    "zoomin", "zoomin", "zoomin", "zoomin",
+    "zoomin", "zoomin",
     "fadeblack", "fadeblack",
     "wipeleft", "wiperight",
+    "wipeup", "wipedown",
     "slideleft", "slideright",
     "squeezeh", "squeezev",
     "diagtl", "diagtr",
+    "circleopen",
     "fade",
 ]
 
@@ -406,8 +407,10 @@ def add_hook_overlay(
     fontfile_arg = f"fontfile={font_path}:" if font_path else ""
     vf = (
         f"drawtext=text='{escaped}':{fontfile_arg}"
-        f"fontsize=60:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
-        f"shadowx=2:shadowy=2:enable='between(t,0,3)'"
+        f"fontsize=88:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
+        f"shadowx=4:shadowy=4:shadowcolor=black@0.8:"
+        f"borderw=3:bordercolor=black@0.6:"
+        f"enable='between(t,0,3)'"
     )
     cmd = [
         "ffmpeg", "-y", "-i", str(video_path),

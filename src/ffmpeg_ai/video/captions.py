@@ -3,18 +3,41 @@ from pathlib import Path
 
 _STYLE_CONFIGS = {
     "karaoke": {
-        "size": 75, "margin_v": 140, "words_per_line": 4, "karaoke": True,
-        "primary": "&H00FFFFFF", "secondary": "&H0000FFFF",
+        "size": 84, "margin_v": 220, "max_words": 3, "karaoke": True,
+        # yellow = active word, white = not-yet-spoken — matches TikTok/CapCut convention
+        "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
     },
     "plain": {
-        "size": 60, "margin_v": 100, "words_per_line": 5, "karaoke": False,
+        "size": 68, "margin_v": 180, "max_words": 6, "karaoke": False,
         "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
     },
     "bold-center": {
-        "size": 90, "margin_v": 240, "words_per_line": 4, "karaoke": False,
+        "size": 96, "margin_v": 300, "max_words": 3, "karaoke": False,
         "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
     },
 }
+
+
+def _chunk_by_pauses(
+    words: list[tuple[float, float, str]],
+    max_words: int = 3,
+    pause_threshold: float = 0.32,
+) -> list[list[tuple[float, float, str]]]:
+    """Split word list at natural speech pauses or max word count — whichever comes first."""
+    if not words:
+        return []
+    chunks: list[list[tuple[float, float, str]]] = []
+    current: list[tuple[float, float, str]] = [words[0]]
+    for prev, curr in zip(words, words[1:]):
+        gap = curr[0] - prev[1]
+        if gap >= pause_threshold or len(current) >= max_words:
+            chunks.append(current)
+            current = [curr]
+        else:
+            current.append(curr)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def audio_to_ass(
@@ -52,12 +75,7 @@ def audio_to_ass(
         audio_to_srt(audio_path, srt_path, model_size)
         return srt_path
 
-    wpl = cfg["words_per_line"]
-    chunks: list[list[tuple[float, float, str]]] = []
-    for i in range(0, len(words), wpl):
-        chunk = words[i : i + wpl]
-        if chunk:
-            chunks.append(chunk)
+    chunks = _chunk_by_pauses(words, max_words=cfg["max_words"])
 
     header = (
         "[Script Info]\n"
@@ -72,8 +90,8 @@ def audio_to_ass(
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,Arial,{cfg['size']},"
-        f"{cfg['primary']},{cfg['secondary']},&H00000000,&HA0000000,"
-        f"1,0,0,0,100,100,2,0,1,4,2,2,30,30,{cfg['margin_v']},1\n"
+        f"{cfg['primary']},{cfg['secondary']},&H00000000,&HC0000000,"
+        f"1,0,0,0,100,100,1,0,1,5,3,2,30,30,{cfg['margin_v']},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
