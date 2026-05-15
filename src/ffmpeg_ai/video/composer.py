@@ -406,11 +406,9 @@ def add_hook_overlay(
     escaped = _escape_drawtext(text)
     fontfile_arg = f"fontfile={font_path}:" if font_path else ""
     vf = (
-        f"drawtext=text='{escaped}':{fontfile_arg}"
+        f"drawtext=text={escaped}:{fontfile_arg}"
         f"fontsize=88:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:"
-        f"shadowx=4:shadowy=4:shadowcolor=black@0.8:"
-        f"borderw=3:bordercolor=black@0.6:"
-        f"enable='between(t,0,3)'"
+        f"shadowx=5:shadowy=5:enable='between(t,0,3)'"
     )
     cmd = [
         "ffmpeg", "-y", "-i", str(video_path),
