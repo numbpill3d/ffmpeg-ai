@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -20,13 +21,14 @@ from .ui.display import console
 from .ui.widgets import PipelineTracker, stats_table
 from .ai.openrouter import generate_script, FREE_MODELS
 from .ai.images import generate_images, load_user_images
-from .ai.tts import synthesize_segments, synthesize, DEFAULT_VOICE
+from .ai.tts import synthesize, DEFAULT_VOICE
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
-    merge_audio, mix_music, burn_captions, final_encode, get_audio_duration,
+    merge_audio, mix_music, burn_captions, encode_video, get_audio_duration,
     detect_beats, snap_to_beats, extract_thumbnail, add_hook_overlay, add_ambience,
     MOTION_STYLES,
 )
+from .video.shorts import MODES
 from .video.captions import audio_to_ass
 
 _JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
@@ -50,6 +52,7 @@ def _find_font() -> str:
 async def run_pipeline(
     topic: str,
     output_path: Path,
+    mode: str = "shorts",
     duration: int = 45,
     model: str = FREE_MODELS[0],
     voice: str = DEFAULT_VOICE,
@@ -75,12 +78,15 @@ async def run_pipeline(
     script_path:      load script JSON from file instead of calling LLM.
     edit_script:      open generated script in $EDITOR before rendering.
     fresh:            ignore all cached job data and start from scratch.
-    quiet:            suppress live TUI — one line per stage to stdout.
+    quiet:            suppress live TUI - one line per stage to stdout.
     thumbnail:        extract a thumbnail JPEG alongside the output file.
     style:            tone preset: educational, dramatic, listicle, documentary.
     caption_style:    karaoke, plain, or bold-center.
     no_captions:      skip transcription and caption burn entirely.
     """
+    if mode not in MODES:
+        raise ValueError(f"unknown mode {mode!r} — choose from: {', '.join(MODES)}")
+    spec = MODES[mode]
     start_time = time.time()
 
     job_dir = _JOB_CACHE / _slug(topic)
@@ -109,7 +115,7 @@ async def run_pipeline(
             tracker.start("SCRIPT", f"model: {model_short}")
             script = await generate_script(
                 topic, duration=duration, model=model,
-                style=style,
+                style=style, mode=mode,
             )
             script_cache.write_text(json.dumps(script, indent=2))
             tracker.complete("SCRIPT", "generated new script")
@@ -159,7 +165,7 @@ async def run_pipeline(
                 tracker._live.stop()
             editor = os.environ.get("EDITOR", "nano")
             try:
-                subprocess.run([editor, str(edit_file)])
+                subprocess.run([*shlex.split(editor), str(edit_file)])
             except FileNotFoundError:
                 raise RuntimeError(
                     f"editor not found: {editor!r} — set $EDITOR to an installed editor"
@@ -194,32 +200,39 @@ async def run_pipeline(
         tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
 
         async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
-            # 1. Synthesize all parts
             hook_audio = tts_dir / "hook.mp3"
-            await synthesize(hook["text"], hook_audio, voice=voice)
-
-            seg_audios = await synthesize_segments(segments, tts_dir, voice=voice)
-
             cta_audio = tts_dir / "cta.mp3"
-            await synthesize(cta["text"], cta_audio, voice=voice)
+            seg_paths = [tts_dir / f"seg_{i:03d}.mp3" for i in range(len(segments))]
 
-            all_a = [hook_audio] + list(seg_audios) + [cta_audio]
+            # Synthesize hook, CTA, and all segments in parallel
+            results = await asyncio.gather(
+                synthesize(hook["text"], hook_audio, voice=voice),
+                synthesize(cta["text"], cta_audio, voice=voice),
+                *[
+                    synthesize(seg["text"], seg_paths[i], voice=voice)
+                    for i, seg in enumerate(segments)
+                ],
+            )
+            seg_audios = list(results[2:])
+
+            all_a = [hook_audio] + seg_audios + [cta_audio]
             await asyncio.to_thread(concat_audio, all_a, combined_audio)
 
-            # 2. Map parts to visual prompts and measure durations
-            timeline_prompts = []
-            part_mapping = []  # list of (duration, n_images)
+            # Probe all durations in parallel
+            durs = await asyncio.gather(*[asyncio.to_thread(get_audio_duration, a) for a in all_a])
+            h_dur, *mid, c_dur = durs
+            seg_durs = mid
 
-            h_dur = await asyncio.to_thread(get_audio_duration, hook_audio)
+            timeline_prompts = []
+            part_mapping = []
+
             timeline_prompts.extend(hook["visual_prompts"])
             part_mapping.append((h_dur, len(hook["visual_prompts"])))
 
             for i, seg in enumerate(segments):
-                s_dur = await asyncio.to_thread(get_audio_duration, seg_audios[i])
                 timeline_prompts.extend(seg["visual_prompts"])
-                part_mapping.append((s_dur, len(seg["visual_prompts"])))
+                part_mapping.append((seg_durs[i], len(seg["visual_prompts"])))
 
-            c_dur = await asyncio.to_thread(get_audio_duration, cta_audio)
             timeline_prompts.extend(cta["visual_prompts"])
             part_mapping.append((c_dur, len(cta["visual_prompts"])))
 
@@ -298,13 +311,13 @@ async def run_pipeline(
         extra_per_clip = total_overlap / n_clips
         clip_durations = [d + extra_per_clip for d in raw_clip_durations]
 
-        # 3. Limit to 58s
-        if total_dur > 58.0:
-            total_dur = 58.0
+        # 3. Limit to spec.max_duration
+        if total_dur > spec.max_duration:
+            total_dur = spec.max_duration
             current_v_sum = 0.0
             new_durations = []
             for d in clip_durations:
-                if current_v_sum + d > 58.0 + total_overlap:
+                if current_v_sum + d > spec.max_duration + total_overlap:
                     break
                 new_durations.append(d)
                 current_v_sum += d
@@ -341,6 +354,7 @@ async def run_pipeline(
                 path = image_to_video(
                     images[idx], clip_durations[idx],
                     clip_dir / f"clip_{idx:03d}.mp4",
+                    spec=spec,
                     motion=motions[idx],
                 )
                 with _clip_lock:
@@ -359,9 +373,12 @@ async def run_pipeline(
             concat_with_transitions(clips, clip_durations, raw_video, transition_duration=trans_d)
             merge_audio(raw_video, combined_audio, with_audio_path)
 
-            # Apply hook overlay
-            captioned_hook = tmp_dir / "hooked.mp4"
-            add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
+            # Apply hook overlay (shorts only — landscape hook is multi-sentence prose)
+            if mode == "shorts":
+                captioned_hook = tmp_dir / "hooked.mp4"
+                add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
+            else:
+                captioned_hook = with_audio_path
             tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
 
             # ── 5. Captions ───────────────────────────────────────────────────
@@ -374,7 +391,7 @@ async def run_pipeline(
                 try:
                     ass_path = tmp_dir / "captions.ass"
                     subtitle_path = await asyncio.to_thread(
-                        audio_to_ass, combined_audio, ass_path, style=caption_style,
+                        audio_to_ass, combined_audio, ass_path, style=caption_style, mode=mode,
                     )
                     captioned = tmp_dir / "captioned.mp4"
                     await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
@@ -402,7 +419,7 @@ async def run_pipeline(
             # ── 7. Export ─────────────────────────────────────────────────────
             tracker.start("EXPORT", f"→ {output_path.name}")
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            final_encode(pre_encode, output_path)
+            encode_video(pre_encode, output_path, spec)
 
             thumb_note = ""
             if thumbnail:

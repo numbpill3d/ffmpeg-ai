@@ -2,18 +2,33 @@
 from pathlib import Path
 
 _STYLE_CONFIGS = {
-    "karaoke": {
-        "size": 84, "margin_v": 220, "max_words": 3, "karaoke": True,
-        # yellow = active word, white = not-yet-spoken — matches TikTok/CapCut convention
-        "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
+    "shorts": {
+        "karaoke": {
+            "size": 84, "margin_v": 220, "max_words": 3, "karaoke": True,
+            "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
+        },
+        "plain": {
+            "size": 68, "margin_v": 180, "max_words": 6, "karaoke": False,
+            "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
+        },
+        "bold-center": {
+            "size": 96, "margin_v": 300, "max_words": 3, "karaoke": False,
+            "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
+        },
     },
-    "plain": {
-        "size": 68, "margin_v": 180, "max_words": 6, "karaoke": False,
-        "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
-    },
-    "bold-center": {
-        "size": 96, "margin_v": 300, "max_words": 3, "karaoke": False,
-        "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
+    "landscape": {
+        "karaoke": {
+            "size": 52, "margin_v": 60, "max_words": 4, "karaoke": True,
+            "primary": "&H0000FFFF", "secondary": "&H00FFFFFF",
+        },
+        "plain": {
+            "size": 42, "margin_v": 50, "max_words": 8, "karaoke": False,
+            "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
+        },
+        "bold-center": {
+            "size": 60, "margin_v": 70, "max_words": 4, "karaoke": False,
+            "primary": "&H00FFFFFF", "secondary": "&H00FFFFFF",
+        },
     },
 }
 
@@ -40,30 +55,39 @@ def _chunk_by_pauses(
     return chunks
 
 
+def _segs_to_srt(seg_list: list, output_path: Path) -> Path:
+    """Write an SRT file from an already-transcribed segment list."""
+    srt_lines: list[str] = []
+    for i, seg in enumerate(seg_list, 1):
+        start = _fmt_time(seg.start)
+        end   = _fmt_time(seg.end)
+        srt_lines += [str(i), f"{start} --> {end}", seg.text.strip(), ""]
+    output_path.write_text("\n".join(srt_lines), encoding="utf-8")
+    return output_path
+
+
 def audio_to_ass(
     audio_path: Path,
     output_path: Path,
     model_size: str = "base",
     style: str = "karaoke",
+    mode: str = "shorts",
 ) -> Path:
-    """Transcribe audio and write an ASS file with configurable caption style.
-
-    Styles:
-      karaoke    — TikTok-style word-level highlight fill (default)
-      plain      — clean white subtitles, no karaoke timing
-      bold-center — large bold centered text, no karaoke timing
-    """
+    """Transcribe audio and write an ASS file with configurable caption style."""
     from faster_whisper import WhisperModel
 
-    cfg = _STYLE_CONFIGS.get(style, _STYLE_CONFIGS["karaoke"])
+    mode_cfgs = _STYLE_CONFIGS.get(mode, _STYLE_CONFIGS["shorts"])
+    cfg = mode_cfgs.get(style, mode_cfgs["karaoke"])
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(
+    whisper = WhisperModel(model_size, device="cpu", compute_type="int8")
+    raw_segs, _ = whisper.transcribe(
         str(audio_path), beam_size=5, word_timestamps=True, language="en"
     )
+    # Materialize the generator so we can reuse it for SRT fallback without reloading the model
+    seg_list = list(raw_segs)
 
     words: list[tuple[float, float, str]] = []
-    for seg in segments:
+    for seg in seg_list:
         if seg.words:
             for w in seg.words:
                 text = w.word.strip()
@@ -72,16 +96,17 @@ def audio_to_ass(
 
     if not words:
         srt_path = output_path.with_suffix(".srt")
-        audio_to_srt(audio_path, srt_path, model_size)
+        _segs_to_srt(seg_list, srt_path)
         return srt_path
 
     chunks = _chunk_by_pauses(words, max_words=cfg["max_words"])
 
+    res_x, res_y = (1920, 1080) if mode == "landscape" else (1080, 1920)
     header = (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
-        "PlayResX: 1080\n"
-        "PlayResY: 1920\n"
+        f"PlayResX: {res_x}\n"
+        f"PlayResY: {res_y}\n"
         "WrapStyle: 0\n"
         "\n"
         "[V4+ Styles]\n"
@@ -121,17 +146,9 @@ def audio_to_srt(audio_path: Path, output_path: Path, model_size: str = "base") 
     """Transcribe audio and write an SRT file (segment-level)."""
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(str(audio_path), beam_size=5, language="en")
-
-    srt_lines: list[str] = []
-    for i, seg in enumerate(segments, 1):
-        start = _fmt_time(seg.start)
-        end   = _fmt_time(seg.end)
-        srt_lines += [str(i), f"{start} --> {end}", seg.text.strip(), ""]
-
-    output_path.write_text("\n".join(srt_lines), encoding="utf-8")
-    return output_path
+    whisper = WhisperModel(model_size, device="cpu", compute_type="int8")
+    raw_segs, _ = whisper.transcribe(str(audio_path), beam_size=5, language="en")
+    return _segs_to_srt(list(raw_segs), output_path)
 
 
 def _ass_time(seconds: float) -> str:

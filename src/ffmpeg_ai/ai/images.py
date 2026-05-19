@@ -1,5 +1,7 @@
 """Image acquisition: AI generation (multiple providers) and user-supplied images."""
 import asyncio
+import base64
+import json
 import os
 import random
 import urllib.parse
@@ -105,14 +107,14 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
     Tries flux-realism first (better quality), falls back to flux.
     """
     encoded = urllib.parse.quote(prompt, safe="")
-    for model in _POLLINATIONS_MODELS:
-        url = (
-            f"https://image.pollinations.ai/prompt/{encoded}"
-            f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
-        )
-        for attempt in range(4):
-            try:
-                async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
+        for model in _POLLINATIONS_MODELS:
+            url = (
+                f"https://image.pollinations.ai/prompt/{encoded}"
+                f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
+            )
+            for attempt in range(4):
+                try:
                     resp = await client.get(url)
                     if resp.status_code == 429:
                         await asyncio.sleep(10 * (attempt + 1) + random.uniform(1, 5))
@@ -123,11 +125,11 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
                         break  # not an image or too small — try next model
                     output_path.write_bytes(resp.content)
                     return output_path
-            except (httpx.TimeoutException, httpx.NetworkError):
-                await asyncio.sleep(5 * (attempt + 1))
-            except httpx.HTTPStatusError:
-                if attempt < 3:
+                except (httpx.TimeoutException, httpx.NetworkError):
                     await asyncio.sleep(5 * (attempt + 1))
+                except httpx.HTTPStatusError:
+                    if attempt < 3:
+                        await asyncio.sleep(5 * (attempt + 1))
     return None
 
 
@@ -152,26 +154,25 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
         "parameters": {"width": IMG_WIDTH, "height": IMG_HEIGHT},
     }
 
-    for model in _HF_MODELS:
-        url = f"https://router.huggingface.co/hf-inference/models/{model}"
-        for attempt in range(2):
-            try:
-                async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        for model in _HF_MODELS:
+            url = f"https://router.huggingface.co/hf-inference/models/{model}"
+            for attempt in range(2):
+                try:
                     resp = await client.post(url, json=body, headers=headers)
-                if resp.status_code == 503:
-                    import json
-                    try:
-                        wait = json.loads(resp.content).get("estimated_time", 20)
-                    except Exception:
-                        wait = 20
-                    await asyncio.sleep(min(wait, 30))
-                    continue
-                if resp.status_code != 200 or len(resp.content) < 1024:
+                    if resp.status_code == 503:
+                        try:
+                            wait = json.loads(resp.content).get("estimated_time", 20)
+                        except Exception:
+                            wait = 20
+                        await asyncio.sleep(min(wait, 30))
+                        continue
+                    if resp.status_code != 200 or len(resp.content) < 1024:
+                        break  # try next model
+                    output_path.write_bytes(resp.content)
+                    return output_path
+                except (httpx.TimeoutException, httpx.NetworkError):
                     break  # try next model
-                output_path.write_bytes(resp.content)
-                return output_path
-            except (httpx.TimeoutException, httpx.NetworkError):
-                break  # try next model
     return None
 
 
@@ -336,7 +337,6 @@ async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
 
 async def _try_stable_horde(prompt: str, output_path: Path, seed: int) -> Path | None:
     """Community GPU cluster — guest key built-in, register at aihorde.net for priority."""
-    import base64
     key = os.environ.get("STABLE_HORDE_API_KEY", "0000000000")
     headers = {"apikey": key, "Content-Type": "application/json"}
     payload = {
@@ -403,7 +403,6 @@ async def _try_together(prompt: str, output_path: Path, seed: int) -> Path | Non
     """Returns path on success, None if no TOGETHER_API_KEY or error.
     Uses FLUX.1-schnell-Free via Together AI's free tier.
     """
-    import base64
     key = os.environ.get("TOGETHER_API_KEY", "")
     if not key:
         return None

@@ -1,5 +1,6 @@
 """CLI entry point."""
 import asyncio
+import datetime
 import os
 import re
 from pathlib import Path
@@ -13,6 +14,7 @@ from rich import box
 from .ui.display import print_banner, console
 from .ai.openrouter import FREE_MODELS, STYLE_PRESETS
 from .ai.tts import VOICES
+from .video.shorts import MODES
 
 load_dotenv()
 app = typer.Typer(
@@ -59,7 +61,7 @@ def main(ctx: typer.Context):
 
     arg_table.add_row("TOPIC", "str", "(required)", "Topic or idea for the Short")
     arg_table.add_row("-o / --output", "path", "~/Videos/…", "Output file path")
-    arg_table.add_row("-d / --duration", "int", "45", "Target duration in seconds (max 58)")
+    arg_table.add_row("-d / --duration", "int", "300", "Target duration in seconds (max 600)")
     arg_table.add_row("-m / --model", "str", "llama-3.3-70b:free", "OpenRouter model ID")
     arg_table.add_row("-v / --voice", "str", "en-female", "TTS voice (see: voices command)")
     arg_table.add_row("-M / --music", "path", "none", "Background music (MP3/WAV), auto-ducked")
@@ -124,8 +126,9 @@ def main(ctx: typer.Context):
 @app.command()
 def generate(
     topic: str = typer.Argument(..., help="Topic or idea for the Short"),
+    mode: str = typer.Option("shorts", help="Output mode: shorts (9:16) or landscape (16:9)"),
     output: Optional[Path] = typer.Option(None, "-o", "--output"),
-    duration: int = typer.Option(45, "-d", "--duration"),
+    duration: int = typer.Option(300, "-d", "--duration", help="Target duration in seconds (max 600)"),  # noqa: E501
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
     dry_run: bool = typer.Option(False, "--dry-run"),
@@ -161,6 +164,12 @@ def generate(
         console.print("[bold red]error:[/] OPENROUTER_API_KEY not set — add to .env or export it")
         raise typer.Exit(1)
 
+    if mode not in MODES:
+        console.print(
+            f"[bold red]error:[/] unknown mode '{mode}'. choices: {', '.join(MODES)}"
+        )
+        raise typer.Exit(1)
+
     if style and style not in _STYLE_CHOICES:
         console.print(
             f"[bold red]error:[/] unknown style '{style}'. choices: {', '.join(_STYLE_CHOICES)}"
@@ -187,7 +196,6 @@ def generate(
         raise typer.Exit(1)
 
     if output is None:
-        import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         output = Path.home() / "Videos" / "ffmpeg-ai" / f"{ts}.mp4"
 
@@ -197,8 +205,9 @@ def generate(
     selected_voice = VOICES.get(voice, voice)
     asyncio.run(run_pipeline(
         topic=topic,
+        mode=mode,
         output_path=output,
-        duration=min(duration, 58),
+        duration=min(duration, 600),
         model=model,
         voice=selected_voice,
         dry_run=dry_run,
@@ -225,7 +234,7 @@ def batch(
     output_dir: Optional[Path] = typer.Option(
         None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"
     ),
-    duration: int = typer.Option(45, "-d", "--duration"),
+    duration: int = typer.Option(300, "-d", "--duration", help="Target duration in seconds (max 600)"),  # noqa: E501
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
     style: Optional[str] = typer.Option(None, "--style"),
@@ -264,7 +273,6 @@ def batch(
     failed = 0
     for i, topic in enumerate(topics, 1):
         console.print(f"\n[bold cyan]── {i}/{len(topics)}: {topic} ──[/]")
-        import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
         out = out_dir / f"{ts}_{slug}.mp4"
@@ -272,7 +280,7 @@ def batch(
             asyncio.run(run_pipeline(
                 topic=topic,
                 output_path=out,
-                duration=min(duration, 58),
+                duration=min(duration, 600),
                 model=model,
                 voice=selected_voice,
                 style=style,

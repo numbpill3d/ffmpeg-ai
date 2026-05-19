@@ -1,6 +1,6 @@
 # ffmpeg-ai
 
-a python cli that generates youtube shorts end-to-end using only free ai services. give it a topic, get back a vertical 1080x1920 video with voiceover, burned captions, and ai-generated visuals.
+a python cli that generates youtube shorts (and landscape videos) end-to-end using only free ai services. give it a topic, get back a video with voiceover, burned captions, ken burns motion, and ai-generated visuals.
 
 ---
 
@@ -18,12 +18,15 @@ a python cli that generates youtube shorts end-to-end using only free ai service
 
 ## what it does
 
-1. generates a script from your topic via openrouter
-2. fetches high-quality AI images (supports **Flux 1.1** via BFL/Fal.ai/Prodia, or free fallbacks)
-3. **Semantic Sync:** images are semantically linked to script segments for maximum relevance
-4. synthesizes voiceover using edge-tts (microsoft tts, completely free)
-5. transcribes audio locally with faster-whisper to produce captions
-6. composes everything into a shorts-ready mp4 via ffmpeg with cinematic motion
+1. generates a script from your topic via openrouter (free llm, auto-fallback through 7 models)
+2. synthesizes voiceover with edge-tts — hook, each segment, and cta in parallel
+3. fetches ai images synced to script segments (7 providers, cascading fallback)
+4. applies ken burns motion + random xfade transitions to build video clips
+5. transcribes audio locally with faster-whisper to produce burned-in captions
+6. optionally mixes background music with sidechain compression
+7. final encode to spec (shorts 9:16 or landscape 16:9)
+
+output includes a thumbnail jpeg alongside the mp4.
 
 ---
 
@@ -49,43 +52,101 @@ cp .env.example .env
 ## usage
 
 ```bash
-# generate a short from a topic
-python -m ffmpeg_ai generate "the history of the moon"
+# basic short
+ffmpeg-ai generate "the history of the moon"
 
-# preview the pipeline steps without making api calls
-python -m ffmpeg_ai generate --dry-run "any topic"
-```
+# landscape video (up to 10 min)
+ffmpeg-ai generate "history of the roman empire" --mode landscape -d 300
 
-or via the installed entrypoint:
+# style preset
+ffmpeg-ai generate "deep sea creatures" --style dramatic
 
-```bash
-ffmpeg-ai generate "deep sea creatures ranked"
+# caption style
+ffmpeg-ai generate "stoic philosophy" --caption-style plain
+
+# edit the script before rendering
+ffmpeg-ai generate "mars colonization" --edit-script
+
+# add background music (auto-ducked under narration)
+ffmpeg-ai generate "ancient egypt" --music ~/music/ambient.mp3
+
+# use your own images instead of ai generation
+ffmpeg-ai generate "topic" --images-dir ~/my-images/
+
+# batch generate from a topics file (one topic per line, # = comment)
+ffmpeg-ai batch topics.txt -o ~/Videos/batch/
+
+# resume a job (uses cached script + images)
+ffmpeg-ai generate "the history of the moon"
+
+# force fresh run, ignore all cache
+ffmpeg-ai generate "the history of the moon" --fresh
+
+# dry run — script only, no video rendered
+ffmpeg-ai generate "any topic" --dry-run
 ```
 
 ---
 
-## output spec
+## output modes
 
-| property   | value              |
-|------------|--------------------|
-| resolution | 1080 x 1920 (9:16) |
-| framerate  | 30 fps             |
-| max length | 60 seconds         |
-| video codec| h.264              |
-| audio codec| aac                |
-| captions   | burned-in (ass)    |
+| mode      | resolution    | aspect | max length |
+|-----------|---------------|--------|------------|
+| shorts    | 1080 × 1920   | 9:16   | 58 seconds |
+| landscape | 1920 × 1080   | 16:9   | 10 minutes |
+
+both modes use h.264 + aac, burned-in captions, ken burns motion, and xfade transitions.
 
 ---
 
-## ai services used
+## style presets (`--style`)
 
-| service            | purpose              | auth required |
-|--------------------|----------------------|---------------|
-| openrouter         | script generation    | api key       |
-| **Flux (BFL/Fal)** | premium images       | optional      |
-| pollinations.ai    | free image fallback  | none          |
-| edge-tts           | voiceover / tts      | none          |
-| faster-whisper     | local transcription  | none (local)  |
+| preset       | tone                                              |
+|--------------|---------------------------------------------------|
+| educational  | authoritative, measured, surprising fact → implication |
+| dramatic     | cinematic, intense, short punchy sentences        |
+| listicle     | countdown format, numbered points, fast cuts      |
+| documentary  | journalistic, reflective, context → story → insight |
+
+---
+
+## caption styles (`--caption-style`)
+
+| style       | description                                      |
+|-------------|--------------------------------------------------|
+| karaoke     | word-level highlight, 3 words per line (default) |
+| plain       | clean subtitles, 6 words per line                |
+| bold-center | large centered text, 3 words per line            |
+
+---
+
+## image providers
+
+tried in this order, falling back on failure. all paid keys are optional.
+
+| provider       | env var              | notes                              |
+|----------------|----------------------|------------------------------------|
+| bfl            | `BFL_API_KEY`        | flux 1.1 pro (paid)                |
+| fal            | `FAL_KEY`            | flux dev via fal.ai (paid)         |
+| prodia         | `PRODIA_TOKEN`       | flux schnell, ultra-fast (paid)    |
+| pollinations   | —                    | flux-realism / flux, free, no key  |
+| huggingface    | `HF_TOKEN`           | flux schnell + sdxl fallback       |
+| stable_horde   | `STABLE_HORDE_API_KEY` | community cluster, guest key built-in |
+| together       | `TOGETHER_API_KEY`   | flux schnell free tier             |
+
+override the order with `--providers bfl,fal,pollinations`.
+
+---
+
+## job cache
+
+each job is cached at `~/.cache/ffmpeg-ai/jobs/<slug>/`:
+
+- `script.json` — reused on re-run unless `--fresh`
+- `images/frame_*.jpg` — reused if count matches
+- `tts/` — always re-synthesized
+
+re-running the same topic resumes from cached data automatically.
 
 ---
 
@@ -93,20 +154,35 @@ ffmpeg-ai generate "deep sea creatures ranked"
 
 ```
 src/ffmpeg_ai/
-├── cli.py           # typer entrypoint
-├── pipeline.py      # full generation pipeline
+├── cli.py           # typer entrypoint + all commands
+├── pipeline.py      # orchestrates the full generation pipeline
 ├── ai/
-│   ├── openrouter.py    # llm client
-│   ├── images.py        # pollinations image fetcher
+│   ├── openrouter.py    # llm client, model fallback logic
+│   ├── images.py        # multi-provider image generation
 │   └── tts.py           # edge-tts voiceover
 ├── video/
 │   ├── composer.py      # all ffmpeg subprocess calls
-│   ├── captions.py      # whisper + ass/srt generation
-│   └── shorts.py        # shorts constants and helpers
+│   ├── captions.py      # faster-whisper + ass/srt generation
+│   └── shorts.py        # video spec constants (resolution, fps, codec args)
 └── ui/
-    ├── display.py        # ascii banner, pipeline status
-    └── widgets.py        # rich renderables
+    ├── display.py        # animated ascii banner
+    └── widgets.py        # rich live pipeline tracker
 ```
+
+---
+
+## env vars
+
+| var                   | required | purpose                          |
+|-----------------------|----------|----------------------------------|
+| `OPENROUTER_API_KEY`  | yes      | llm script generation (free tier)|
+| `BFL_API_KEY`         | no       | black forest labs flux 1.1       |
+| `FAL_KEY`             | no       | fal.ai flux dev                  |
+| `PRODIA_TOKEN`        | no       | prodia flux schnell              |
+| `HF_TOKEN`            | no       | huggingface inference            |
+| `STABLE_HORDE_API_KEY`| no       | registered horde key (priority)  |
+| `TOGETHER_API_KEY`    | no       | together ai flux schnell free    |
+| `EDITOR`              | no       | editor for `--edit-script`       |
 
 ---
 
@@ -114,7 +190,6 @@ src/ffmpeg_ai/
 
 ```bash
 uv pip install -e ".[dev]"
-pytest
 ruff check src/
 ```
 
