@@ -283,6 +283,7 @@ async def run_pipeline(
                 image_prompts, img_dir, providers=providers,
                 max_concurrent=4,
                 on_image_done=lambda i, is_pl: tracker.image_done(i, is_pl),
+                width=spec.width, height=spec.height,
             )
             detail = f"{len(imgs)} images"
             if pc:

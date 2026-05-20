@@ -9,39 +9,49 @@ from pathlib import Path
 from typing import Callable, Optional
 import httpx
 
-# Cinematic style suffixes appended to AI image prompts
-_CINEMATIC_STYLES = [
+# Cinematic style suffixes — portrait (9:16) and landscape (16:9) variants
+_CINEMATIC_PORTRAIT = [
     "cinematic vertical photography, dramatic lighting, hyper-realistic, ultra detailed, 4K",
     "vertical cinematic shot, professional color grading, rich vivid colors, sharp focus, 8K",
     "dramatic vertical composition, golden hour rim lighting, atmospheric depth, photorealistic",
     "vertical portrait frame, high contrast dramatic lighting, rich color palette, ultra HD",
-    (
-        "cinematic wide angle vertical shot, moody atmosphere, "
-        "detailed texture, professional photography"
-    ),
-    (
-        "vertical frame, neon-accented dramatic lighting, "
-        "deep shadows, cyberpunk realism, hyper detailed"
-    ),
-    (
-        "vertical composition, soft cinematic bokeh, "
-        "golden warm tones, shallow depth of field, film grain"
-    ),
+    "cinematic vertical shot, moody atmosphere, detailed texture, professional photography",
+    "vertical frame, neon-accented lighting, deep shadows, cyberpunk realism, hyper detailed",
+    "vertical composition, cinematic bokeh, golden warm tones, shallow depth of field, film grain",
 ]
 
+_CINEMATIC_LANDSCAPE = [
+    "cinematic wide shot, dramatic lighting, hyper-realistic, ultra detailed, 4K, 16:9",
+    "landscape cinematic photography, professional color grading, vivid colors, sharp focus, 8K",
+    "dramatic wide composition, golden hour rim lighting, atmospheric depth, photorealistic",
+    "cinematic establishing shot, high contrast dramatic lighting, rich color palette, ultra HD",
+    "documentary wide angle shot, moody atmosphere, detailed texture, professional cinematography",
+    "widescreen frame, neon-accented lighting, deep shadows, cinematic realism, hyper detailed",
+    "landscape composition, soft cinematic bokeh, warm tones, shallow depth of field, anamorphic",
+]
 
-def _enrich_prompt(prompt: str) -> str:
-    """Append cinematic style modifiers to an image generation prompt."""
-    return f"{prompt}, {random.choice(_CINEMATIC_STYLES)}"
-
-# 9:16 vertical for Shorts
+# Defaults for shorts (9:16)
 IMG_WIDTH = 1080
 IMG_HEIGHT = 1920
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 # Default folder for user-supplied images
 USER_IMAGES_DIR = Path(__file__).parents[3] / "assets" / "user_images"
 
-_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+def _enrich_prompt(prompt: str, width: int, height: int) -> str:
+    """Append cinematic style modifiers appropriate for the target aspect ratio."""
+    styles = _CINEMATIC_LANDSCAPE if width > height else _CINEMATIC_PORTRAIT
+    return f"{prompt}, {random.choice(styles)}"
+
+
+def _clamp_dims(width: int, height: int, max_side: int, multiple: int = 32) -> tuple[int, int]:
+    """Scale dims to fit max_side while preserving aspect ratio, rounded to multiple."""
+    scale = min(1.0, max_side / max(width, height))
+    w = max(multiple, round(width * scale / multiple) * multiple)
+    h = max(multiple, round(height * scale / multiple) * multiple)
+    return w, h
 
 
 # ── User images ──────────────────────────────────────────────────────────────
@@ -56,7 +66,7 @@ def load_user_images(images_dir: Path, count: int) -> list[Path]:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_placeholder(prompt: str, output_path: Path) -> Path:
+def _make_placeholder(prompt: str, output_path: Path, width: int, height: int) -> Path:
     """Dark gradient placeholder via Pillow — last resort when all providers fail."""
     from PIL import Image, ImageDraw, ImageFont
     import hashlib
@@ -64,11 +74,11 @@ def _make_placeholder(prompt: str, output_path: Path) -> Path:
     h = int(hashlib.md5(prompt.encode()).hexdigest()[:6], 16)
     r, g, b = (h >> 16) & 0x7F, (h >> 8) & 0x7F, h & 0x7F
 
-    img = Image.new("RGB", (IMG_WIDTH, IMG_HEIGHT), (r, g, b))
+    img = Image.new("RGB", (width, height), (r, g, b))
     draw = ImageDraw.Draw(img)
-    for y in range(IMG_HEIGHT):
-        a = int(80 * (1 - y / IMG_HEIGHT))
-        draw.line([(0, y), (IMG_WIDTH, y)], fill=(r + a, g + a, b + a))
+    for y in range(height):
+        a = int(80 * (1 - y / height))
+        draw.line([(0, y), (width, y)], fill=(r + a, g + a, b + a))
 
     words = prompt.split()
     lines, line = [], []
@@ -87,10 +97,10 @@ def _make_placeholder(prompt: str, output_path: Path) -> Path:
         font = ImageFont.load_default()
 
     total_h = len(lines) * 60
-    y_start = (IMG_HEIGHT - total_h) // 2
+    y_start = (height - total_h) // 2
     for i, txt in enumerate(lines):
         bbox = draw.textbbox((0, 0), txt, font=font)
-        x = (IMG_WIDTH - (bbox[2] - bbox[0])) // 2
+        x = (width - (bbox[2] - bbox[0])) // 2
         draw.text((x, y_start + i * 60), txt, fill=(220, 220, 220), font=font)
 
     img.save(str(output_path), "JPEG", quality=85)
@@ -102,16 +112,16 @@ def _make_placeholder(prompt: str, output_path: Path) -> Path:
 _POLLINATIONS_MODELS = ["flux-realism", "flux"]
 
 
-async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None on failure.
-    Tries flux-realism first (better quality), falls back to flux.
-    """
+async def _try_pollinations(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
+    """Returns path on success, None on failure."""
     encoded = urllib.parse.quote(prompt, safe="")
     async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
         for model in _POLLINATIONS_MODELS:
             url = (
                 f"https://image.pollinations.ai/prompt/{encoded}"
-                f"?width={IMG_WIDTH}&height={IMG_HEIGHT}&seed={seed}&nologo=true&model={model}"
+                f"?width={width}&height={height}&seed={seed}&nologo=true&model={model}"
             )
             for attempt in range(4):
                 try:
@@ -122,7 +132,7 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
                     resp.raise_for_status()
                     ct = resp.headers.get("content-type", "")
                     if not ct.startswith("image/") or len(resp.content) < 1024:
-                        break  # not an image or too small — try next model
+                        break
                     output_path.write_bytes(resp.content)
                     return output_path
                 except (httpx.TimeoutException, httpx.NetworkError):
@@ -135,14 +145,16 @@ async def _try_pollinations(prompt: str, output_path: Path, seed: int) -> Path |
 
 # ── Provider: HuggingFace Inference API (free with HF_TOKEN) ─────────────────
 
-# Models tried in order — all support text-to-image
 _HF_MODELS = [
     "black-forest-labs/FLUX.1-schnell",
     "stabilityai/stable-diffusion-xl-base-1.0",
     "runwayml/stable-diffusion-v1-5",
 ]
 
-async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
+
+async def _try_huggingface(
+    prompt: str, output_path: Path, width: int, height: int
+) -> Path | None:
     """Returns path on success, None if no HF_TOKEN or all models fail."""
     token = os.environ.get("HF_TOKEN", "")
     if not token:
@@ -151,7 +163,7 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     body = {
         "inputs": prompt,
-        "parameters": {"width": IMG_WIDTH, "height": IMG_HEIGHT},
+        "parameters": {"width": width, "height": height},
     }
 
     async with httpx.AsyncClient(timeout=90.0) as client:
@@ -168,29 +180,32 @@ async def _try_huggingface(prompt: str, output_path: Path) -> Path | None:
                         await asyncio.sleep(min(wait, 30))
                         continue
                     if resp.status_code != 200 or len(resp.content) < 1024:
-                        break  # try next model
+                        break
                     output_path.write_bytes(resp.content)
                     return output_path
                 except (httpx.TimeoutException, httpx.NetworkError):
-                    break  # try next model
+                    break
     return None
 
 
 # ── Provider: Black Forest Labs (Flux API) ───────────────────────────────────
 
-async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
+async def _try_bfl(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
     """Returns path on success, None if no BFL_API_KEY or error.
-    Uses FLUX 1.1 [pro] with asynchronous polling.
+    BFL max dimension is 1440; dims are snapped to multiples of 32.
     """
     key = os.environ.get("BFL_API_KEY", "")
     if not key:
         return None
 
+    w, h = _clamp_dims(width, height, max_side=1440, multiple=32)
     headers = {"x-key": key, "Content-Type": "application/json"}
     payload = {
         "prompt": prompt,
-        "width": 768,    # BFL max height is 1440; use 768x1344 (~9:16, multiples of 32)
-        "height": 1344,
+        "width": w,
+        "height": h,
         "seed": seed,
         "prompt_upsampling": False,
         "safety_tolerance": 3,
@@ -208,7 +223,7 @@ async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
             if not task_id:
                 return None
 
-            for _ in range(30):  # poll up to 60s
+            for _ in range(30):
                 await asyncio.sleep(2)
                 res_resp = await client.get(
                     f"https://api.bfl.ai/v1/get_result?id={task_id}",
@@ -235,10 +250,10 @@ async def _try_bfl(prompt: str, output_path: Path, seed: int) -> Path | None:
 
 # ── Provider: Fal.ai (Flux) ──────────────────────────────────────────────────
 
-async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None if no FAL_KEY or error.
-    Uses FLUX.1 [dev] via fal.ai with sync mode.
-    """
+async def _try_fal(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
+    """Returns path on success, None if no FAL_KEY or error."""
     key = os.environ.get("FAL_KEY", "")
     if not key:
         return None
@@ -247,7 +262,7 @@ async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
     payload = {
         "input": {
             "prompt": prompt,
-            "image_size": {"width": IMG_WIDTH, "height": IMG_HEIGHT},
+            "image_size": {"width": width, "height": height},
             "seed": seed,
         }
     }
@@ -275,10 +290,10 @@ async def _try_fal(prompt: str, output_path: Path, seed: int) -> Path | None:
 
 # ── Provider: Prodia ─────────────────────────────────────────────────────────
 
-async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None if no PRODIA_TOKEN or error.
-    Uses FLUX.1 [schnell] via Prodia v2 API for maximum speed.
-    """
+async def _try_prodia(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
+    """Returns path on success, None if no PRODIA_TOKEN or error."""
     token = os.environ.get("PRODIA_TOKEN", "")
     if not token:
         return None
@@ -288,8 +303,8 @@ async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
         "type": "inference.flux.schnell.txt2img.v1",
         "config": {
             "prompt": prompt,
-            "width": IMG_WIDTH,
-            "height": IMG_HEIGHT,
+            "width": width,
+            "height": height,
             "seed": seed,
             "steps": 4,
         },
@@ -335,15 +350,23 @@ async def _try_prodia(prompt: str, output_path: Path, seed: int) -> Path | None:
 
 # ── Provider: Stable Horde (free community cluster, no key needed) ────────────
 
-async def _try_stable_horde(prompt: str, output_path: Path, seed: int) -> Path | None:
+# SDXL dimension buckets — pick closest 16:9 or 9:16 based on orientation
+_HORDE_LANDSCAPE = (1344, 768)
+_HORDE_PORTRAIT  = (768, 1344)
+
+
+async def _try_stable_horde(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
     """Community GPU cluster — guest key built-in, register at aihorde.net for priority."""
     key = os.environ.get("STABLE_HORDE_API_KEY", "0000000000")
+    w, h = _HORDE_LANDSCAPE if width > height else _HORDE_PORTRAIT
     headers = {"apikey": key, "Content-Type": "application/json"}
     payload = {
         "prompt": prompt,
         "params": {
-            "width": 768,
-            "height": 1344,  # closest SDXL bucket to 9:16
+            "width": w,
+            "height": h,
             "steps": 25,
             "sampler_name": "k_euler_a",
             "n": 1,
@@ -365,7 +388,7 @@ async def _try_stable_horde(prompt: str, output_path: Path, seed: int) -> Path |
             if not job_id:
                 return None
 
-            for _ in range(60):  # poll up to 5 minutes (slow on guest key)
+            for _ in range(60):
                 await asyncio.sleep(5)
                 check = await client.get(
                     f"https://stablehorde.net/api/v2/generate/check/{job_id}",
@@ -399,19 +422,22 @@ async def _try_stable_horde(prompt: str, output_path: Path, seed: int) -> Path |
 
 # ── Provider: Together AI (free FLUX.1-schnell tier) ─────────────────────────
 
-async def _try_together(prompt: str, output_path: Path, seed: int) -> Path | None:
-    """Returns path on success, None if no TOGETHER_API_KEY or error.
-    Uses FLUX.1-schnell-Free via Together AI's free tier.
-    """
+async def _try_together(
+    prompt: str, output_path: Path, seed: int, width: int, height: int
+) -> Path | None:
+    """Returns path on success, None if no TOGETHER_API_KEY or error."""
     key = os.environ.get("TOGETHER_API_KEY", "")
     if not key:
         return None
+
+    # Together supports landscape: swap to 1792x1024 for 16:9
+    tw, th = (1792, 1024) if width > height else (1024, 1792)
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     payload = {
         "model": "black-forest-labs/FLUX.1-schnell-Free",
         "prompt": prompt,
-        "width": 1024,
-        "height": 1792,  # ~9:16
+        "width": tw,
+        "height": th,
         "steps": 4,
         "n": 1,
         "seed": seed,
@@ -450,38 +476,37 @@ async def generate_image(
     output_path: Path,
     seed: int = 42,
     providers: list[str] | None = None,
+    width: int = IMG_WIDTH,
+    height: int = IMG_HEIGHT,
 ) -> tuple[Path, bool]:
     """Generate one image, trying providers in order, placeholder as last resort.
 
     Returns (path, is_placeholder). is_placeholder=True means all providers failed.
-    providers: ordered list of provider names. Defaults to all available.
-    Available: "bfl", "fal", "prodia", "pollinations", "huggingface",
-               "stable_horde" (free, guest key built-in), "together" (TOGETHER_API_KEY)
     """
     if providers is None:
         providers = _ALL_PROVIDERS
 
-    enriched = _enrich_prompt(prompt)
+    enriched = _enrich_prompt(prompt, width, height)
     for provider in providers:
         result = None
         if provider == "bfl":
-            result = await _try_bfl(enriched, output_path, seed)
+            result = await _try_bfl(enriched, output_path, seed, width, height)
         elif provider == "fal":
-            result = await _try_fal(enriched, output_path, seed)
+            result = await _try_fal(enriched, output_path, seed, width, height)
         elif provider == "prodia":
-            result = await _try_prodia(enriched, output_path, seed)
+            result = await _try_prodia(enriched, output_path, seed, width, height)
         elif provider == "pollinations":
-            result = await _try_pollinations(enriched, output_path, seed)
+            result = await _try_pollinations(enriched, output_path, seed, width, height)
         elif provider == "huggingface":
-            result = await _try_huggingface(enriched, output_path)
+            result = await _try_huggingface(enriched, output_path, width, height)
         elif provider == "stable_horde":
-            result = await _try_stable_horde(enriched, output_path, seed)
+            result = await _try_stable_horde(enriched, output_path, seed, width, height)
         elif provider == "together":
-            result = await _try_together(enriched, output_path, seed)
+            result = await _try_together(enriched, output_path, seed, width, height)
         if result is not None:
             return result, False
 
-    return _make_placeholder(prompt, output_path), True
+    return _make_placeholder(prompt, output_path, width, height), True
 
 
 async def generate_images(
@@ -490,11 +515,12 @@ async def generate_images(
     providers: list[str] | None = None,
     max_concurrent: int = 4,
     on_image_done: Optional[Callable[[int, bool], None]] = None,
+    width: int = IMG_WIDTH,
+    height: int = IMG_HEIGHT,
 ) -> tuple[list[Path], int]:
     """Generate images for all prompts in parallel (up to max_concurrent at once).
 
-    Returns (paths, placeholder_count). placeholder_count > 0 means some providers failed.
-    on_image_done(index, is_placeholder) is called as each image completes.
+    Returns (paths, placeholder_count).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     sem = asyncio.Semaphore(max_concurrent)
@@ -502,7 +528,8 @@ async def generate_images(
     async def _gen(i: int, prompt: str) -> tuple[Path, bool]:
         async with sem:
             path, is_placeholder = await generate_image(
-                prompt, out_dir / f"frame_{i:03d}.jpg", seed=i * 7, providers=providers
+                prompt, out_dir / f"frame_{i:03d}.jpg",
+                seed=i * 7, providers=providers, width=width, height=height,
             )
             if on_image_done is not None:
                 on_image_done(i, is_placeholder)
