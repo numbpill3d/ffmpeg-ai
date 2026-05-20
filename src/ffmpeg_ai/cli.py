@@ -74,6 +74,7 @@ def main(ctx: typer.Context):
     arg_table.add_row("--no-ai-images", "flag", "off", "Disable AI image generation")
     arg_table.add_row("--thumbnail/--no-thumbnail", "flag", "on", "Extract thumbnail JPEG")
     arg_table.add_row("--no-captions", "flag", "off", "Skip whisper + caption burn")
+    arg_table.add_row("--no-ambience", "flag", "off", "Skip background ambience layer")
     arg_table.add_row("--fresh", "flag", "off", "Ignore cache, start from scratch")
     arg_table.add_row("-q / --quiet", "flag", "off", "Minimal output — one line per stage")
     arg_table.add_row("--dry-run", "flag", "off", "Script only, no video rendered")
@@ -156,6 +157,9 @@ def generate(
     no_captions: bool = typer.Option(
         False, "--no-captions", help="Skip transcription and caption burning"
     ),
+    no_ambience: bool = typer.Option(
+        False, "--no-ambience", help="Skip background ambience layer"
+    ),
 ):
     """[bold cyan]Generate a YouTube Short from a topic.[/]"""
     print_banner()
@@ -223,6 +227,7 @@ def generate(
         style=style,
         caption_style=caption_style,
         no_captions=no_captions,
+        no_ambience=no_ambience,
     ))
 
 
@@ -234,18 +239,26 @@ def batch(
     output_dir: Optional[Path] = typer.Option(
         None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"
     ),
+    mode: str = typer.Option("shorts", help="Output mode: shorts (9:16) or landscape (16:9)"),
     duration: int = typer.Option(300, "-d", "--duration", help="Target duration in seconds (max 600)"),  # noqa: E501
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
     style: Optional[str] = typer.Option(None, "--style"),
     caption_style: str = typer.Option("karaoke", "--caption-style"),
     no_thumbnail: bool = typer.Option(False, "--no-thumbnail"),
+    no_ambience: bool = typer.Option(False, "--no-ambience"),
     fresh: bool = typer.Option(False, "--fresh"),
     quiet: bool = typer.Option(False, "-q", "--quiet"),
 ):
     """[bold cyan]Generate multiple Shorts from a file of topics (one per line).[/]"""
     if not os.environ.get("OPENROUTER_API_KEY", ""):
         console.print("[bold red]error:[/] OPENROUTER_API_KEY not set")
+        raise typer.Exit(1)
+
+    if mode not in MODES:
+        console.print(
+            f"[bold red]error:[/] unknown mode '{mode}'. choices: {', '.join(MODES)}"
+        )
         raise typer.Exit(1)
 
     if not topics_file.is_file():
@@ -280,12 +293,14 @@ def batch(
             asyncio.run(run_pipeline(
                 topic=topic,
                 output_path=out,
+                mode=mode,
                 duration=min(duration, 600),
                 model=model,
                 voice=selected_voice,
                 style=style,
                 caption_style=caption_style,
                 thumbnail=not no_thumbnail,
+                no_ambience=no_ambience,
                 fresh=fresh,
                 quiet=quiet,
             ))

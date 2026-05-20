@@ -506,6 +506,12 @@ async def generate_image(
         if result is not None:
             return result, False
 
+    # Last-chance retry: stripped prompt, pollinations only
+    bare = prompt[:100]
+    result = await _try_pollinations(bare, output_path, seed + 9973, width, height)
+    if result is not None:
+        return result, False
+
     return _make_placeholder(prompt, output_path, width, height), True
 
 

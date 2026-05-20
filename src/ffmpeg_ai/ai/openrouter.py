@@ -70,11 +70,12 @@ async def generate_script(
 ) -> dict:
     """Try model, fall back through FREE_MODELS list on rate-limit or null response."""
     models_to_try = [model] + [m for m in FREE_MODELS if m != model]
+    client = get_client()
     last_err: Exception | None = None
     for m in models_to_try:
         try:
             result = await _generate_script(
-                topic, duration=duration, model=m, style=style, mode=mode
+                topic, duration=duration, model=m, style=style, mode=mode, client=client
             )
             if result is not None:
                 return result
@@ -109,8 +110,10 @@ async def _generate_script(
     model: str = FREE_MODELS[0],
     style: str | None = None,
     mode: str = "shorts",
+    client: AsyncOpenAI | None = None,
 ) -> dict:
-    client = get_client()
+    if client is None:
+        client = get_client()
 
     if mode == "landscape":
         return await _generate_landscape_script(

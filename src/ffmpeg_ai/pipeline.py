@@ -1,5 +1,6 @@
 """Orchestrates the full Short generation pipeline."""
 import asyncio
+import hashlib
 import json
 import os
 import random
@@ -26,7 +27,7 @@ from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
     merge_audio, mix_music, burn_captions, encode_video, get_audio_duration,
     detect_beats, snap_to_beats, extract_thumbnail, add_hook_overlay, add_ambience,
-    MOTION_STYLES,
+    get_color_grade, MOTION_STYLES,
 )
 from .video.shorts import MODES
 from .video.captions import audio_to_ass
@@ -69,6 +70,7 @@ async def run_pipeline(
     style: Optional[str] = None,
     caption_style: str = "karaoke",
     no_captions: bool = False,
+    no_ambience: bool = False,
 ) -> Path:
     """
     images_dir:       use images from this directory instead of AI generation.
@@ -204,16 +206,30 @@ async def run_pipeline(
             cta_audio = tts_dir / "cta.mp3"
             seg_paths = [tts_dir / f"seg_{i:03d}.mp3" for i in range(len(segments))]
 
-            # Synthesize hook, CTA, and all segments in parallel
-            results = await asyncio.gather(
-                synthesize(hook["text"], hook_audio, voice=voice),
-                synthesize(cta["text"], cta_audio, voice=voice),
-                *[
-                    synthesize(seg["text"], seg_paths[i], voice=voice)
-                    for i, seg in enumerate(segments)
-                ],
+            # TTS caching: skip synthesis when script+voice hash matches
+            all_texts = [hook["text"], cta["text"]] + [s["text"] for s in segments]
+            tts_hash = hashlib.sha256((voice + "".join(all_texts)).encode()).hexdigest()[:16]
+            hash_file = tts_dir / "hash.txt"
+            all_segs = [hook_audio] + seg_paths + [cta_audio]
+            tts_cached = (
+                not fresh
+                and hash_file.exists()
+                and hash_file.read_text().strip() == tts_hash
+                and all(p.exists() for p in all_segs)
             )
-            seg_audios = list(results[2:])
+
+            if not tts_cached:
+                await asyncio.gather(
+                    synthesize(hook["text"], hook_audio, voice=voice),
+                    synthesize(cta["text"], cta_audio, voice=voice),
+                    *[
+                        synthesize(seg["text"], seg_paths[i], voice=voice)
+                        for i, seg in enumerate(segments)
+                    ],
+                )
+                hash_file.write_text(tts_hash)
+
+            seg_audios = seg_paths
 
             all_a = [hook_audio] + seg_audios + [cta_audio]
             await asyncio.to_thread(concat_audio, all_a, combined_audio)
@@ -237,7 +253,8 @@ async def run_pipeline(
             part_mapping.append((c_dur, len(cta["visual_prompts"])))
 
             total_dur = sum(d for d, _ in part_mapping)
-            tracker.complete("TTS", f"{total_dur:.1f}s")
+            cache_note = "  (cached)" if tts_cached else ""
+            tracker.complete("TTS", f"{total_dur:.1f}s{cache_note}")
             return combined_audio, total_dur, timeline_prompts, part_mapping
 
         # We must do TTS first to get durations, then Images
@@ -271,7 +288,7 @@ async def run_pipeline(
             if not use_ai_images:
                 from .ai.images import _make_placeholder
                 imgs = [
-                    _make_placeholder(p, img_dir / f"frame_{i:03d}.jpg")
+                    _make_placeholder(p, img_dir / f"frame_{i:03d}.jpg", spec.width, spec.height)
                     for i, p in enumerate(image_prompts)
                 ]
                 for i in range(len(imgs)):
@@ -341,6 +358,7 @@ async def run_pipeline(
                 ]
 
         motions = _pick_motions(n_clips)
+        color_grade = get_color_grade(style)
         tracker.start("VIDEO", f"{n_clips} clips  Ken Burns · xfade")
 
         with tempfile.TemporaryDirectory(prefix="ffai_") as tmp:
@@ -357,6 +375,7 @@ async def run_pipeline(
                     clip_dir / f"clip_{idx:03d}.mp4",
                     spec=spec,
                     motion=motions[idx],
+                    color_grade=color_grade,
                 )
                 with _clip_lock:
                     done_clips[0] += 1
@@ -396,6 +415,9 @@ async def run_pipeline(
                     )
                     captioned = tmp_dir / "captioned.mp4"
                     await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
+                    # Export subtitle file alongside the output
+                    sub_out = output_path.with_suffix(subtitle_path.suffix)
+                    shutil.copy2(subtitle_path, sub_out)
                     tracker.complete("CAPTIONS", caption_style)
                     post_caption = captioned
                 except Exception as cap_err:
@@ -403,11 +425,15 @@ async def run_pipeline(
                     post_caption = pre_caption
 
             # ── 5a. Ambience ──────────────────────────────────────────────────
-            tracker.start("AMBIENCE", "layered soundscapes")
-            final_audio_path = tmp_dir / "with_ambience.mp4"
-            add_ambience(post_caption, final_audio_path)
-            tracker.complete("AMBIENCE", "tech-hum layer added")
-            pre_encode = final_audio_path
+            if no_ambience:
+                tracker.complete("AMBIENCE", "skipped (--no-ambience)")
+                pre_encode = post_caption
+            else:
+                tracker.start("AMBIENCE", "layered soundscapes")
+                final_audio_path = tmp_dir / "with_ambience.mp4"
+                add_ambience(post_caption, final_audio_path)
+                tracker.complete("AMBIENCE", "tech-hum layer added")
+                pre_encode = final_audio_path
 
             # ── 6. Music ──────────────────────────────────────────────────────
             if music_path is not None and music_path.is_file():

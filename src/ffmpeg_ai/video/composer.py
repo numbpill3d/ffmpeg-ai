@@ -5,8 +5,18 @@ import subprocess
 from pathlib import Path
 from .shorts import VideoSpec, FPS
 
-# Color grade applied to every clip: warm contrast lift + saturation boost + vignette
-_COLOR_GRADE = "eq=contrast=1.12:saturation=1.4:brightness=0.015,vignette=PI/5"
+# Per-style color grades (eq + vignette filter strings)
+_COLOR_GRADES: dict[str | None, str] = {
+    "documentary": "eq=contrast=1.05:saturation=0.85:brightness=-0.01,vignette=PI/6",
+    "dramatic":    "eq=contrast=1.35:saturation=1.6:brightness=-0.02,vignette=PI/4",
+    "listicle":    "eq=contrast=1.15:saturation=1.7:brightness=0.02,vignette=PI/5",
+    "educational": "eq=contrast=1.08:saturation=1.2:brightness=0.01,vignette=PI/6",
+    None:          "eq=contrast=1.12:saturation=1.4:brightness=0.015,vignette=PI/5",
+}
+
+
+def get_color_grade(style: str | None = None) -> str:
+    return _COLOR_GRADES.get(style, _COLOR_GRADES[None])
 
 def _get_work_dims(spec: VideoSpec) -> tuple[int, int]:
     return spec.width * 2 // 3, spec.height * 2 // 3
@@ -117,11 +127,13 @@ def image_to_video(
     output_path: Path,
     spec: VideoSpec,
     motion: str = "zoom_in",
+    color_grade: str = "",
 ) -> Path:
     """Convert a static image to a video clip with Ken Burns motion + color grade."""
     w, h = _get_work_dims(spec)
     zoom_filter = _kenburns_filter(motion, duration, spec)
-    vf = f"scale={w}:{h},{zoom_filter},{_COLOR_GRADE},scale={spec.width}:{spec.height}"
+    grade = color_grade or _COLOR_GRADES[None]
+    vf = f"scale={w}:{h},{zoom_filter},{grade},scale={spec.width}:{spec.height}"
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", str(image_path),
