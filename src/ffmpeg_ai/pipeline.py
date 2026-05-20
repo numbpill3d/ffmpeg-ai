@@ -416,6 +416,7 @@ async def run_pipeline(
                     captioned = tmp_dir / "captioned.mp4"
                     await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
                     # Export subtitle file alongside the output
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
                     sub_out = output_path.with_suffix(subtitle_path.suffix)
                     shutil.copy2(subtitle_path, sub_out)
                     tracker.complete("CAPTIONS", caption_style)

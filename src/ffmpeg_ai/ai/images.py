@@ -506,11 +506,16 @@ async def generate_image(
         if result is not None:
             return result, False
 
-    # Last-chance retry: stripped prompt, pollinations only
+    # Last-chance retry: stripped prompt + downscaled dims via pollinations.
+    # The main loop already tried full-size; large dims (1920x1080) trigger rate limits.
+    # ffmpeg upscales the image in the Ken Burns filter chain so resolution loss is acceptable.
     bare = prompt[:100]
-    result = await _try_pollinations(bare, output_path, seed + 9973, width, height)
-    if result is not None:
-        return result, False
+    for scale_denom in (2, 3):
+        rw = max(64, round(width / scale_denom / 32) * 32)
+        rh = max(64, round(height / scale_denom / 32) * 32)
+        result = await _try_pollinations(bare, output_path, seed + 9973 + scale_denom, rw, rh)
+        if result is not None:
+            return result, False
 
     return _make_placeholder(prompt, output_path, width, height), True
 
