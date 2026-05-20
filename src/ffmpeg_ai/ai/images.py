@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Callable, Optional
 import httpx
 
+# Serialise all outbound Pollinations HTTP calls.  Their free tier rate-limits
+# per IP, and concurrent asyncio coroutines hit the same bucket simultaneously.
+# Holding the lock only during the actual request-response round-trip; backoff
+# sleeps happen outside it so other coroutines aren't starved during a 429.
+_POLLINATIONS_LOCK = asyncio.Lock()
+
 # Cinematic style suffixes — portrait (9:16) and landscape (16:9) variants
 _CINEMATIC_PORTRAIT = [
     "cinematic vertical photography, dramatic lighting, hyper-realistic, ultra detailed, 4K",
@@ -125,10 +131,9 @@ async def _try_pollinations(
             )
             for attempt in range(4):
                 try:
-                    resp = await client.get(url)
+                    async with _POLLINATIONS_LOCK:
+                        resp = await client.get(url)
                     if resp.status_code == 429:
-                        # Wide jitter desynchronises concurrent retries that all hit the
-                        # rate limit at the same time — narrow jitter just re-syncs them.
                         await asyncio.sleep(10 * (attempt + 1) + random.uniform(0, 30))
                         continue
                     resp.raise_for_status()
