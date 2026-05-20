@@ -296,9 +296,12 @@ async def run_pipeline(
                 tracker.complete("IMAGES", f"{n_total_images} placeholders")
                 return imgs, n_total_images
 
+            # Landscape requests at 1920x1080 hit free provider rate limits hard
+            # when fired in bursts — cap concurrency to 2 to spread the load.
+            img_concurrency = 2 if max(spec.width, spec.height) >= 1280 else 4
             imgs, pc = await generate_images(
                 image_prompts, img_dir, providers=providers,
-                max_concurrent=4,
+                max_concurrent=img_concurrency,
                 on_image_done=lambda i, is_pl: tracker.image_done(i, is_pl),
                 width=spec.width, height=spec.height,
             )

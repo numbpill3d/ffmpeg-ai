@@ -127,7 +127,9 @@ async def _try_pollinations(
                 try:
                     resp = await client.get(url)
                     if resp.status_code == 429:
-                        await asyncio.sleep(10 * (attempt + 1) + random.uniform(1, 5))
+                        # Wide jitter desynchronises concurrent retries that all hit the
+                        # rate limit at the same time — narrow jitter just re-syncs them.
+                        await asyncio.sleep(10 * (attempt + 1) + random.uniform(0, 30))
                         continue
                     resp.raise_for_status()
                     ct = resp.headers.get("content-type", "")
@@ -398,6 +400,12 @@ async def _try_stable_horde(
                     continue
                 data = check.json()
                 if data.get("faulted"):
+                    return None
+                # Abort if no workers can serve this request
+                if not data.get("is_possible", True):
+                    return None
+                # Abort if queue wait is > 3 min (guest key will never win priority)
+                if not data.get("done") and data.get("wait_time", 0) > 180:
                     return None
                 if not data.get("done"):
                     continue
