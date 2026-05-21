@@ -129,7 +129,7 @@ def generate(
     topic: str = typer.Argument(..., help="Topic or idea for the Short"),
     mode: str = typer.Option("shorts", help="Output mode: shorts (9:16) or landscape (16:9)"),
     output: Optional[Path] = typer.Option(None, "-o", "--output"),
-    duration: int = typer.Option(300, "-d", "--duration", help="Target duration in seconds (max 600)"),  # noqa: E501
+    duration: Optional[int] = typer.Option(None, "-d", "--duration", help="Target duration in seconds (max 600; defaults 600 for landscape, 45 for shorts)"),  # noqa: E501
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
     dry_run: bool = typer.Option(False, "--dry-run"),
@@ -173,6 +173,9 @@ def generate(
             f"[bold red]error:[/] unknown mode '{mode}'. choices: {', '.join(MODES)}"
         )
         raise typer.Exit(1)
+
+    if duration is None:
+        duration = 600 if mode == "landscape" else 45
 
     if style and style not in _STYLE_CHOICES:
         console.print(
@@ -240,7 +243,7 @@ def batch(
         None, "-o", "--output-dir", help="Output directory (default: ~/Videos/ffmpeg-ai/)"
     ),
     mode: str = typer.Option("shorts", help="Output mode: shorts (9:16) or landscape (16:9)"),
-    duration: int = typer.Option(300, "-d", "--duration", help="Target duration in seconds (max 600)"),  # noqa: E501
+    duration: Optional[int] = typer.Option(None, "-d", "--duration", help="Target duration in seconds (max 600; defaults 600 for landscape, 45 for shorts)"),  # noqa: E501
     model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
     voice: str = typer.Option("en-female", "-v", "--voice"),
     style: Optional[str] = typer.Option(None, "--style"),
@@ -260,6 +263,9 @@ def batch(
             f"[bold red]error:[/] unknown mode '{mode}'. choices: {', '.join(MODES)}"
         )
         raise typer.Exit(1)
+
+    if duration is None:
+        duration = 600 if mode == "landscape" else 45
 
     if not topics_file.is_file():
         console.print(f"[bold red]✗[/] file not found: {topics_file}")
@@ -364,6 +370,132 @@ def providers():
     )
     t.add_row("together",     "TOGETHER_API_KEY",     _status(together_key))
     console.print(t)
+
+
+@app.command()
+def auto(
+    count: int = typer.Option(3, "--count", "-n", help="Number of Shorts to generate"),
+    upload: bool = typer.Option(False, "--upload", help="Upload to YouTube after rendering"),
+    privacy: str = typer.Option("public", "--privacy", help="public / unlisted / private"),
+    style: Optional[str] = typer.Option(None, "--style"),
+    voice: str = typer.Option("en-female", "-v", "--voice"),
+    quiet: bool = typer.Option(False, "-q", "--quiet"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Harvest topics only, no generation"),
+):
+    """[bold cyan]Auto-pilot: harvest trending topics → generate Shorts → upload.[/]"""
+    import json as _json
+    from .auto.harvest import harvest, save_seen
+    from .auto.youtube import upload_video, is_configured
+
+    print_banner()
+    console.print(f"[bold cyan]harvesting {count} topics…[/]")
+
+    topics = asyncio.run(harvest(count=count))
+    if not topics:
+        console.print("[bold red]no topics found — try again later[/]")
+        raise typer.Exit(1)
+
+    console.print("[green]topics selected:[/]")
+    for t in topics:
+        console.print(f"  • {t}")
+
+    if dry_run:
+        return
+
+    save_seen(topics)
+
+    out_dir = Path.home() / "Videos" / "ffmpeg-ai" / "auto"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    from .pipeline import run_pipeline
+    selected_voice = VOICES.get(voice, voice)
+
+    generated: list[tuple[str, Path]] = []
+    for i, topic in enumerate(topics, 1):
+        console.print(f"\n[bold cyan]── {i}/{len(topics)}: {topic} ──[/]")
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
+        out  = out_dir / f"{ts}_{slug}.mp4"
+        try:
+            asyncio.run(run_pipeline(
+                topic=topic, output_path=out, mode="shorts", duration=45,
+                voice=selected_voice, style=style, quiet=quiet, thumbnail=True,
+            ))
+            generated.append((topic, out))
+        except Exception as e:
+            console.print(f"[bold red]✗[/] {e}")
+
+    if not upload:
+        console.print(f"\n[bold green]done[/] — {len(generated)} Shorts in {out_dir}")
+        console.print("[dim]add --upload to auto-publish to YouTube[/]")
+        return
+
+    if not is_configured():
+        console.print(
+            "[bold yellow]YouTube not configured — run:[/] "
+            "[bold]ffmpeg-ai youtube-setup[/]"
+        )
+        return
+
+    _JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
+    uploaded = 0
+    for topic, out in generated:
+        job_slug  = re.sub(r"[^a-z0-9-]+", "-", topic.lower().strip())[:48].strip("-") or "untitled"
+        script_p  = _JOB_CACHE / job_slug / "script.json"
+        script    = _json.loads(script_p.read_text()) if script_p.exists() else {}
+        viral     = script.get("viral_package", {})
+
+        title = script.get("title") or topic
+        desc  = viral.get("description") or f"{topic} #shorts"
+        tags  = viral.get("hashtags") or ["#shorts", "#tech"]
+        thumb = out.with_suffix(".thumb.jpg")
+
+        console.print(f"[cyan]uploading:[/] {title}")
+        try:
+            url = upload_video(
+                video_path=out, title=title, description=desc, tags=tags,
+                thumbnail_path=thumb if thumb.exists() else None,
+                privacy=privacy,
+            )
+            console.print(f"[bold green]✓[/] {url}")
+            uploaded += 1
+        except Exception as e:
+            console.print(f"[bold red]✗[/] upload failed: {e}")
+
+    console.print(f"\n[bold green]done[/] — {uploaded}/{len(generated)} uploaded")
+
+
+@app.command(name="youtube-setup")
+def youtube_setup():
+    """[dim]One-time OAuth2 setup for YouTube auto-upload.[/]"""
+    from .auto.youtube import setup_oauth, SECRETS_PATH, TOKEN_PATH
+    console.print("[bold cyan]YouTube OAuth2 setup[/]")
+    console.print()
+    console.print(f"  secrets file: [cyan]{SECRETS_PATH}[/]")
+    console.print(f"  token file:   [cyan]{TOKEN_PATH}[/]")
+    console.print()
+    if TOKEN_PATH.exists():
+        console.print("[green]already configured[/] — token file exists")
+        console.print("[dim]delete it to re-authenticate[/]")
+        return
+    if not SECRETS_PATH.exists():
+        console.print(
+            "[bold yellow]client_secrets.json not found.[/]\n\n"
+            "  1. console.cloud.google.com → APIs & Services\n"
+            "     → Enable [bold]YouTube Data API v3[/]\n"
+            "  2. Credentials → Create OAuth 2.0 Client ID → Desktop app\n"
+            "  3. Download JSON → save to:\n"
+            f"     [cyan]{SECRETS_PATH}[/]\n"
+            "  4. Re-run this command"
+        )
+        raise typer.Exit(1)
+    console.print("opening browser for Google auth…")
+    try:
+        setup_oauth()
+        console.print("[bold green]✓ YouTube configured[/]")
+    except Exception as e:
+        console.print(f"[bold red]error:[/] {e}")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
