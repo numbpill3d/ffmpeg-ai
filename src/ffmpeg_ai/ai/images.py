@@ -13,7 +13,25 @@ import httpx
 # per IP, and concurrent asyncio coroutines hit the same bucket simultaneously.
 # Holding the lock only during the actual request-response round-trip; backoff
 # sleeps happen outside it so other coroutines aren't starved during a 429.
-_POLLINATIONS_LOCK = asyncio.Lock()
+# Lazily initialised per event loop — batch mode calls asyncio.run() multiple
+# times, each creating a new loop; a module-level Lock would be bound to the
+# first loop and raise RuntimeError for all subsequent topics.
+_POLLINATIONS_LOCK: asyncio.Lock | None = None
+
+
+def _get_pollinations_lock() -> asyncio.Lock:
+    global _POLLINATIONS_LOCK
+    if _POLLINATIONS_LOCK is None:
+        _POLLINATIONS_LOCK = asyncio.Lock()
+        return _POLLINATIONS_LOCK
+    lock_loop = getattr(_POLLINATIONS_LOCK, "_loop", None)
+    if lock_loop is not None:
+        try:
+            if lock_loop is not asyncio.get_running_loop():
+                _POLLINATIONS_LOCK = asyncio.Lock()
+        except RuntimeError:
+            _POLLINATIONS_LOCK = asyncio.Lock()
+    return _POLLINATIONS_LOCK
 
 # Cinematic style suffixes — portrait (9:16) and landscape (16:9) variants
 _CINEMATIC_PORTRAIT = [
@@ -131,7 +149,7 @@ async def _try_pollinations(
             )
             for attempt in range(4):
                 try:
-                    async with _POLLINATIONS_LOCK:
+                    async with _get_pollinations_lock():
                         resp = await client.get(url)
                     if resp.status_code == 429:
                         await asyncio.sleep(10 * (attempt + 1) + random.uniform(0, 30))

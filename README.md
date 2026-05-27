@@ -18,7 +18,7 @@ a python cli that generates youtube shorts (and landscape videos) end-to-end usi
 
 ## what it does
 
-1. generates a script from your topic via openrouter (free llm, auto-fallback through 7 models)
+1. generates a script from your topic via openrouter (free llm, auto-fallback through 6 models)
 2. synthesizes voiceover with edge-tts — hook, each segment, and cta in parallel
 3. fetches ai images synced to script segments (7 providers, cascading fallback)
 4. applies ken burns motion + random xfade transitions to build video clips
@@ -107,6 +107,7 @@ both modes use h.264 + aac, burned-in captions, ken burns motion, and xfade tran
 | dramatic     | cinematic, intense, short punchy sentences        |
 | listicle     | countdown format, numbered points, fast cuts      |
 | documentary  | journalistic, reflective, context → story → insight |
+| morris       | empirical, intimate, pharmacological precision — Hamilton Morris register |
 
 ---
 
@@ -144,7 +145,7 @@ each job is cached at `~/.cache/ffmpeg-ai/jobs/<slug>/`:
 
 - `script.json` — reused on re-run unless `--fresh`
 - `images/frame_*.jpg` — reused if count matches
-- `tts/` — always re-synthesized
+- `tts/` — cached by script+voice+rate hash; re-synthesized on any change
 
 re-running the same topic resumes from cached data automatically.
 

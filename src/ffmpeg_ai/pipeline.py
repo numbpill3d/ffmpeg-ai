@@ -199,6 +199,7 @@ async def run_pipeline(
         tts_dir.mkdir(parents=True, exist_ok=True)
         img_dir.mkdir(parents=True, exist_ok=True)
 
+        tts_rate = "+0%" if mode == "landscape" else "+10%"
         tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
 
         async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
@@ -206,9 +207,11 @@ async def run_pipeline(
             cta_audio = tts_dir / "cta.mp3"
             seg_paths = [tts_dir / f"seg_{i:03d}.mp3" for i in range(len(segments))]
 
-            # TTS caching: skip synthesis when script+voice hash matches
+            # TTS caching: skip synthesis when script+voice+rate hash matches
             all_texts = [hook["text"], cta["text"]] + [s["text"] for s in segments]
-            tts_hash = hashlib.sha256((voice + "".join(all_texts)).encode()).hexdigest()[:16]
+            tts_hash = hashlib.sha256(
+                (voice + tts_rate + "".join(all_texts)).encode()
+            ).hexdigest()[:16]
             hash_file = tts_dir / "hash.txt"
             all_segs = [hook_audio] + seg_paths + [cta_audio]
             tts_cached = (
@@ -220,10 +223,10 @@ async def run_pipeline(
 
             if not tts_cached:
                 await asyncio.gather(
-                    synthesize(hook["text"], hook_audio, voice=voice),
-                    synthesize(cta["text"], cta_audio, voice=voice),
+                    synthesize(hook["text"], hook_audio, voice=voice, rate=tts_rate),
+                    synthesize(cta["text"], cta_audio, voice=voice, rate=tts_rate),
                     *[
-                        synthesize(seg["text"], seg_paths[i], voice=voice)
+                        synthesize(seg["text"], seg_paths[i], voice=voice, rate=tts_rate)
                         for i, seg in enumerate(segments)
                     ],
                 )

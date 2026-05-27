@@ -405,6 +405,7 @@ def _escape_drawtext(text: str) -> str:
     text = text.replace("%", "%%")   # prevent drawtext expansion in normal mode
     text = text.replace("'", "\\'")
     text = text.replace(":", "\\:")
+    text = text.replace(",", "\\,")  # comma is a filtergraph separator
     return text
 
 

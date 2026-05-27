@@ -30,17 +30,30 @@ STYLE_PRESETS: dict[str, str] = {
         "Visuals: naturalistic, observational, muted colour palette. "
         "Structure: context → story → insight."
     ),
+    "morris": (
+        "Tone: Hamilton Morris — empirical, intimate, intellectually precise. "
+        "Write in first person as a researcher immersed in the subject. "
+        "Use specific chemical names, pharmacological mechanisms, historical dates, and named "
+        "researchers. Never sensationalise; let facts carry the weight. "
+        "Sentences are measured and deliberate, occasionally long and clause-heavy when the "
+        "complexity demands it. Personal anecdote and scientific rigour coexist naturally. "
+        "Visuals: close macro laboratory shots, archival photographs, molecular structures, "
+        "field work scenes. "
+        "Structure: personal entry point → historical/chemical deep dive → societal or "
+        "philosophical implication → quiet, unresolved conclusion."
+    ),
 }
 
 # Free models ranked by quality/speed (diverse providers to avoid single-provider rate limits)
+# Benchmark 2026-05-20: gpt-oss-120b was the only model to deliver 839/351 words on ibogaine topic.
+# mistral-small removed (404 dead endpoint). nemotron sometimes returns null content.
 FREE_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",        # Meta, 128k ctx, reliable
-    "nousresearch/hermes-3-llama-3.1-405b:free",     # Nous, 405B, high quality
-    "openai/gpt-oss-120b:free",                      # OpenAI infra, 131k ctx
-    "mistralai/mistral-small-3.1-24b-instruct:free", # Mistral, 128k ctx
-    "nvidia/nemotron-3-super-120b-a12b:free",        # NVIDIA, 262k ctx
-    "qwen/qwen3-next-80b-a3b-instruct:free",         # Alibaba, 80B
-    "meta-llama/llama-3.2-3b-instruct:free",         # fast fallback (small)
+    "openai/gpt-oss-120b:free",                  # OpenAI infra, 131k ctx — best landscape quality
+    "meta-llama/llama-3.3-70b-instruct:free",    # Meta, 128k ctx, reliable for shorts
+    "nousresearch/hermes-3-llama-3.1-405b:free", # Nous, 405B, highest quality when available
+    "nvidia/nemotron-3-super-120b-a12b:free",    # NVIDIA, 262k ctx (sometimes null content)
+    "qwen/qwen3-next-80b-a3b-instruct:free",     # Alibaba, 80B
+    "meta-llama/llama-3.2-3b-instruct:free",     # fast fallback (small)
 ]
 
 
@@ -61,6 +74,15 @@ def get_client() -> AsyncOpenAI:
     )
 
 
+def _count_words(result: dict) -> int:
+    parts = [
+        result.get("hook", {}).get("text", ""),
+        result.get("cta", {}).get("text", ""),
+        *[s.get("text", "") for s in result.get("segments", [])],
+    ]
+    return sum(len(t.split()) for t in parts)
+
+
 async def generate_script(
     topic: str,
     duration: int = 45,
@@ -77,9 +99,17 @@ async def generate_script(
             result = await _generate_script(
                 topic, duration=duration, model=m, style=style, mode=mode, client=client
             )
-            if result is not None:
-                return result
-            last_err = RuntimeError(f"Model {m} returned empty content")
+            if result is None:
+                last_err = RuntimeError(f"Model {m} returned empty content")
+                continue
+            min_words = result.get("_min_words")
+            if min_words and _count_words(result) < min_words:
+                retry = await _generate_script(
+                    topic, duration=duration, model=m, style=style, mode=mode, client=client
+                )
+                if retry is not None and _count_words(retry) >= _count_words(result):
+                    result = retry
+            return result
         except Exception as e:
             import json as _json
             msg = str(e).lower()
@@ -126,7 +156,17 @@ async def _generate_script(
         "with precise cinematic visual direction. "
         "The script must read as a single cohesive story from hook to CTA — "
         "never a collection of disconnected facts. "
-        "Output strict JSON only — no markdown fences, no extra text, no comments."
+        "Output strict JSON only — no markdown fences, no extra text, no comments.\n\n"
+        "CRITICAL — writing visual_prompts:\n"
+        "Every visual_prompt MUST depict the exact subject named in its segment's narration. "
+        "Name a concrete noun: a specific person, organism, object, location, or action "
+        "from the text. "
+        "Never write a generic atmosphere or landscape prompt unless the narration "
+        "explicitly describes one.\n"
+        "BAD: 'dramatic sky at sunset, cinematic vertical shot'\n"
+        "GOOD: 'close-up of scientist in white lab coat injecting compound into lab mouse, "
+        "fluorescent laboratory lighting, photorealistic, 8k'\n"
+        "Each prompt must answer: what specific thing from the narration is visible?"
     )
     if style and style in STYLE_PRESETS:
         system += (
@@ -173,6 +213,9 @@ Requirements:
 - All text MUST be complete sentences — never truncate mid-thought to hit a word count.
 - Each segment MUST have 2 distinct "visual_prompts".
 - Hook and CTA MUST each have 1 distinct "visual_prompts".
+- Every visual_prompt MUST name the specific subject from that segment's narration text.
+  Generic atmosphere, cityscapes, or abstract scenes are forbidden unless the narration
+  explicitly describes them.
 - Segments MUST form a continuous narrative — each picks up directly where the last left off.
 - The hook MUST introduce the central question or tension the segments resolve.
 - The CTA MUST feel like a natural conclusion to the story — not a detached call to action.
@@ -208,7 +251,17 @@ async def _generate_landscape_script(
         "with precise cinematic visual direction. "
         "The script must read as a single cohesive story from hook to CTA — "
         "never a collection of disconnected facts. "
-        "Output strict JSON only — no markdown fences, no extra text, no comments."
+        "Output strict JSON only — no markdown fences, no extra text, no comments.\n\n"
+        "CRITICAL — writing visual_prompts:\n"
+        "Every visual_prompt MUST depict the exact subject named in its segment's narration. "
+        "Name a concrete noun: a specific person, organism, object, location, or action "
+        "from the text. "
+        "Never write a generic atmosphere or landscape prompt unless the narration "
+        "explicitly describes one.\n"
+        "BAD: 'dramatic sky at sunset, cinematic wide shot'\n"
+        "GOOD: 'close-up of scientist in white lab coat examining compound under microscope, "
+        "fluorescent laboratory lighting, photorealistic, 8k'\n"
+        "Each prompt must answer: what specific thing from the narration is visible?"
     )
     if style and style in STYLE_PRESETS:
         system += (
@@ -217,20 +270,24 @@ async def _generate_landscape_script(
         )
 
     target_dur = min(duration, 600)
-    # ~140 words/min average narration rate
-    max_words = int(target_dur / 60 * 140)
-    # one segment roughly every 25–30 seconds
-    n_segments = max(8, target_dur // 28)
-    words_per_segment = max_words // max(n_segments, 1)
+    # edge-tts GuyNeural at +0% rate ≈ 130 WPM (deliberate documentary pacing)
+    words_per_min = 130
+    target_words = int(target_dur / 60 * words_per_min)
+    min_words = int(target_words * 0.90)
+    # one segment every ~22 seconds gives good visual rhythm
+    n_segments = max(10, target_dur // 22)
+    seg_min = max(60, target_words // (n_segments + 2))  # +2 for hook+cta
+    seg_max = seg_min + 30
 
     user = f"""Write a YouTube video script about: "{topic}"
 Target duration: {target_dur} seconds ({target_dur // 60}m {target_dur % 60}s).
+This script will be read aloud at approximately {words_per_min} words per minute.
 
 Return JSON with exactly this shape:
 {{
   "title": "descriptive, search-optimised title, 6-10 words",
   "hook": {{
-    "text": "2-3 complete sentences introducing the central question or theme the video answers",
+    "text": "EXACTLY 60-80 words. 3-4 complete sentences introducing the central question.",
     "visual_prompts": [
       "AI image prompt — wide establishing shot, cinematic, 8k",
       "AI image prompt — close detail or reaction shot"
@@ -238,7 +295,7 @@ Return JSON with exactly this shape:
   }},
   "segments": [
     {{
-      "text": "~{words_per_segment} words, complete sentences, flows from previous segment",
+      "text": "EXACTLY {seg_min}-{seg_max} words. 4-6 sentences. Dense prose, no padding.",
       "visual_prompts": [
         "AI image prompt 1 (highly specific: subject, action, framing, lighting, 8k, cinematic)",
         "AI image prompt 2 (different angle or complementary detail)"
@@ -246,7 +303,7 @@ Return JSON with exactly this shape:
     }}
   ],
   "cta": {{
-    "text": "2-3 sentences concluding the story, calling back to the hook, ending with a question",
+    "text": "EXACTLY 50-70 words. 3-4 sentences. Conclude, call back to hook, end with a question.",
     "visual_prompts": [
       "AI image prompt — warm conclusive wide shot",
       "AI image prompt — close call-to-action graphic style"
@@ -255,32 +312,38 @@ Return JSON with exactly this shape:
   "viral_package": {{
     "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],
     "description": "150-character YouTube description with primary keyword",
-    "thumbnail_prompt": "High-contrast YouTube thumbnail, bold text overlay, face or \
-focal element, 16:9"
+    "thumbnail_prompt": "High-contrast YouTube thumbnail, bold text, focal element, 16:9"
   }}
 }}
 
-Requirements:
-- Produce exactly {n_segments} segments.
-- Total narration word count MUST be between {int(max_words * 0.85)} and {max_words} words.
-- All text MUST be complete sentences — never truncate mid-thought to hit a word count.
+CRITICAL WORD COUNT REQUIREMENTS — these are hard constraints, not suggestions:
+- Produce EXACTLY {n_segments} segments.
+- Each segment text MUST be {seg_min}-{seg_max} words. Count carefully before writing.
+- Hook text MUST be 60-80 words.
+- CTA text MUST be 50-70 words.
+- Total narration word count (hook + all segments + cta) MUST be at least {min_words} words.
+- A short segment is a failure. Dense, substantive prose is required — not thin summaries.
+- All text MUST be complete sentences — never truncate mid-thought.
 - Each segment MUST have 2 distinct "visual_prompts".
-- Hook MUST have 2 distinct "visual_prompts". CTA MUST have 2 distinct "visual_prompts".
+- Hook MUST have 2 visual_prompts. CTA MUST have 2 visual_prompts.
+- Every visual_prompt MUST name the specific subject from that segment's narration text.
+  Generic atmosphere, cityscapes, or abstract scenes are forbidden unless the narration
+  explicitly describes them.
 - Segments MUST form a continuous narrative — each picks up directly where the last left off.
 - Structure: setup → development → payoff → conclusion across the segments.
-- The hook MUST introduce the central question or tension the segments resolve.
-- The CTA MUST feel like a natural conclusion, calling back to the hook.
-- Script MUST conclude with a specific comment-driving question in the CTA.
-- Script language: active voice, second person ("you"), present tense."""
+- Script MUST conclude with a specific comment-driving question in the CTA."""
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.7,
-        max_tokens=8000,
-        timeout=90,
+        max_tokens=12000,
+        timeout=120,
     )
     content = resp.choices[0].message.content
     if not content:
         return None
-    return json.loads(_strip_fences(content))
+    result = json.loads(_strip_fences(content))
+    result["_target_words"] = target_words
+    result["_min_words"] = min_words
+    return result
