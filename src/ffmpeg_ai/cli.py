@@ -498,5 +498,224 @@ def youtube_setup():
         raise typer.Exit(1)
 
 
+channel_app = typer.Typer(
+    name="channel",
+    help="Multi-channel automation — manage and run automated YouTube channels.",
+    rich_markup_mode="rich",
+)
+app.add_typer(channel_app, name="channel")
+
+
+@channel_app.command("list")
+def channel_list():
+    """[dim]List configured channels.[/]"""
+    from .channels.config import ChannelConfig
+    names = ChannelConfig.list_all()
+    if not names:
+        console.print("[dim]no channels configured — run: ffmpeg-ai channel init-presets[/]")
+        return
+    t = Table(box=box.SIMPLE, border_style="cyan", show_header=True)
+    t.add_column("name",    style="cyan",  no_wrap=True)
+    t.add_column("display", style="white", no_wrap=True)
+    t.add_column("style",   style="yellow", no_wrap=True)
+    t.add_column("voice",   style="dim white", no_wrap=True)
+    t.add_column("upload",  style="dim white", no_wrap=True)
+    t.add_column("sources", style="dim white")
+    for name in names:
+        try:
+            ch = ChannelConfig.load(name)
+            t.add_row(
+                ch.name, ch.display_name, ch.style, ch.voice,
+                str(ch.upload), str(len(ch.sources)),
+            )
+        except Exception as e:
+            t.add_row(name, f"[red]error: {e}[/]", "", "", "", "")
+    console.print(t)
+
+
+@channel_app.command("init-presets")
+def channel_init_presets(
+    force: bool = typer.Option(False, "--force", help="Overwrite existing channel configs"),
+):
+    """[dim]Install the 3 built-in channel presets (tech, history, science).[/]"""
+    from .channels.config import ChannelConfig, PRESETS, CHANNELS_DIR
+    CHANNELS_DIR.mkdir(parents=True, exist_ok=True)
+    for preset in PRESETS:
+        path = CHANNELS_DIR / f"{preset['name']}.json"
+        if path.exists() and not force:
+            console.print(  # noqa: E501
+                f"[dim]skip[/] {preset['name']} (already exists — use --force to overwrite)"
+            )
+            continue
+        ch = ChannelConfig(**preset)
+        ch.save()
+        console.print(f"[bold green]✓[/] {preset['name']}  ({preset['display_name']})")
+    console.print(f"\n[dim]configs saved to {CHANNELS_DIR}[/]")
+    console.print("[dim]edit the JSON files to customise, then run:[/]")
+    console.print("[bold]  ffmpeg-ai channel run <name>[/]")
+
+
+@channel_app.command("run")
+def channel_run(
+    name: str = typer.Argument(..., help="Channel name (e.g. tech, history, science)"),
+    shorts: bool = typer.Option(True, "--shorts/--no-shorts", help="Generate a Short"),
+    landscape: bool = typer.Option(True, "--landscape/--no-landscape", help="Generate long-form"),
+    upload: Optional[bool] = typer.Option(None, "--upload/--no-upload", help="Override upload"),
+    count: int = typer.Option(1, "--count", "-n", help="Number of topics to generate"),
+    model: str = typer.Option(FREE_MODELS[0], "-m", "--model"),
+    quiet: bool = typer.Option(False, "-q", "--quiet"),
+):
+    """[bold cyan]Run a channel: harvest topics → generate videos → upload.[/]"""
+    if not os.environ.get("OPENROUTER_API_KEY", ""):
+        console.print("[bold red]error:[/] OPENROUTER_API_KEY not set")
+        raise typer.Exit(1)
+
+    from .channels.config import ChannelConfig
+    from .channels.runner import run_channel
+
+    try:
+        ch = ChannelConfig.load(name)
+    except FileNotFoundError as e:
+        console.print(f"[bold red]error:[/] {e}")
+        raise typer.Exit(1)
+
+    print_banner()
+    asyncio.run(run_channel(
+        channel=ch,
+        shorts=shorts,
+        landscape=landscape,
+        upload=upload,
+        count=count,
+        quiet=quiet,
+        model=model,
+    ))
+
+
+@channel_app.command("setup-yt")
+def channel_setup_yt(
+    name: str = typer.Argument(..., help="Channel name"),
+):
+    """[dim]Run YouTube OAuth2 for a specific channel.[/]"""
+    from .channels.config import ChannelConfig
+    from .auto.youtube import setup_oauth
+
+    try:
+        ch = ChannelConfig.load(name)
+    except FileNotFoundError as e:
+        console.print(f"[bold red]error:[/] {e}")
+        raise typer.Exit(1)
+
+    console.print(f"[bold cyan]YouTube OAuth2 setup — channel: {name}[/]")
+    console.print(f"  secrets: [cyan]{ch.secrets_path}[/]")
+    console.print(f"  token:   [cyan]{ch.token_path}[/]")
+    console.print()
+
+    if ch.token_path and ch.token_path.exists():
+        console.print("[green]already configured[/] — token file exists")
+        console.print("[dim]delete it to re-authenticate[/]")
+        return
+
+    if not ch.secrets_path or not ch.secrets_path.exists():
+        console.print(
+            "[bold yellow]client_secrets.json not found.[/]\n\n"
+            "  1. console.cloud.google.com → APIs & Services\n"
+            "     → Enable [bold]YouTube Data API v3[/]\n"
+            "  2. Credentials → Create OAuth 2.0 Client ID → Desktop app\n"
+            "  3. Download JSON → save to:\n"
+            f"     [cyan]{ch.secrets_path}[/]\n"
+            "  4. Re-run this command"
+        )
+        raise typer.Exit(1)
+
+    console.print("opening browser for Google auth…")
+    try:
+        setup_oauth(secrets_path=ch.secrets_path, token_path=ch.token_path)
+        console.print("[bold green]✓ YouTube configured[/]")
+
+        # Flip upload flag on in channel config
+        ch.upload = True
+        ch.save()
+        console.print(f"[dim]upload enabled in {ch.name}.json[/]")
+    except Exception as e:
+        console.print(f"[bold red]error:[/] {e}")
+        raise typer.Exit(1)
+
+
+@channel_app.command("timer-install")
+def channel_timer_install(
+    name: Optional[str] = typer.Argument(None, help="Channel name (omit to install all)"),
+    hour: int = typer.Option(9, "--hour", help="Hour of day to run (24h, local time)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print units without installing"),
+):
+    """[dim]Install systemd user timers for automated daily channel runs.[/]"""
+    import shutil
+    from .channels.config import ChannelConfig
+
+    channels = [name] if name else ChannelConfig.list_all()
+    if not channels:
+        console.print("[dim]no channels configured — run: ffmpeg-ai channel init-presets[/]")
+        return
+
+    # Find the ffmpeg-ai executable
+    ffmpeg_ai_bin = shutil.which("ffmpeg-ai") or "ffmpeg-ai"
+    env_file = Path.home() / "Projects" / "Software" / "ffmpeg-ai" / ".env"
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
+
+    stagger = 0
+    for i, ch_name in enumerate(channels):
+        run_hour = (hour + i * 3) % 24  # stagger channels 3h apart
+        service_name = f"ffmpeg-ai-{ch_name}"
+
+        service_unit = f"""\
+[Unit]
+Description=ffmpeg-ai auto channel: {ch_name}
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart={ffmpeg_ai_bin} channel run {ch_name} -q
+EnvironmentFile=-{env_file}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+        timer_unit = f"""\
+[Unit]
+Description=Daily ffmpeg-ai run — channel: {ch_name}
+
+[Timer]
+OnCalendar=*-*-* {run_hour:02d}:00:00
+AccuracySec=30m
+Persistent=true
+RandomizedDelaySec=900
+
+[Install]
+WantedBy=timers.target
+"""
+        if dry_run:
+            console.print(f"\n[bold cyan]── {service_name}.service ──[/]")
+            console.print(service_unit)
+            console.print(f"[bold cyan]── {service_name}.timer ──[/]")
+            console.print(timer_unit)
+        else:
+            systemd_dir.mkdir(parents=True, exist_ok=True)
+            (systemd_dir / f"{service_name}.service").write_text(service_unit)
+            (systemd_dir / f"{service_name}.timer").write_text(timer_unit)
+            console.print(f"[bold green]✓[/] {service_name}  (runs daily at {run_hour:02d}:00)")
+        stagger += 1
+
+    if not dry_run:
+        console.print(
+            "\n[dim]enable with:[/]\n"
+            "  [bold]systemctl --user daemon-reload[/]\n"
+            + "\n".join(
+                f"  [bold]systemctl --user enable --now ffmpeg-ai-{n}.timer[/]"
+                for n in channels
+            )
+        )
+
+
 if __name__ == "__main__":
     app()

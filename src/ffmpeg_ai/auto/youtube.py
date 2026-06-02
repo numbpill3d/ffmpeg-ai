@@ -34,38 +34,53 @@ def _import_google():
         )
 
 
-def is_configured() -> bool:
-    return TOKEN_PATH.exists() or SECRETS_PATH.exists()
+def is_configured(
+    secrets_path: Optional[Path] = None,
+    token_path: Optional[Path] = None,
+) -> bool:
+    sp = secrets_path or SECRETS_PATH
+    tp = token_path or TOKEN_PATH
+    return tp.exists() or sp.exists()
 
 
-def setup_oauth() -> None:
+def setup_oauth(
+    secrets_path: Optional[Path] = None,
+    token_path: Optional[Path] = None,
+) -> None:
     """Run interactive OAuth flow and save credentials. Call once."""
+    sp = secrets_path or SECRETS_PATH
+    tp = token_path or TOKEN_PATH
     Credentials, InstalledAppFlow, Request, _, _ = _import_google()
-    if not SECRETS_PATH.exists():
+    if not sp.exists():
         raise RuntimeError(_SETUP_HINT)
-    flow = InstalledAppFlow.from_client_secrets_file(str(SECRETS_PATH), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(sp), SCOPES)
     creds = flow.run_local_server(port=0)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    TOKEN_PATH.write_text(creds.to_json())
-    print(f"credentials saved → {TOKEN_PATH}")
+    tp.parent.mkdir(parents=True, exist_ok=True)
+    tp.write_text(creds.to_json())
+    print(f"credentials saved → {tp}")
 
 
-def _get_credentials():
+def _get_credentials(
+    secrets_path: Optional[Path] = None,
+    token_path: Optional[Path] = None,
+):
+    sp = secrets_path or SECRETS_PATH
+    tp = token_path or TOKEN_PATH
     Credentials, InstalledAppFlow, Request, _, _ = _import_google()
     creds = None
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+    if tp.exists():
+        creds = Credentials.from_authorized_user_file(str(tp), SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            TOKEN_PATH.write_text(creds.to_json())
+            tp.write_text(creds.to_json())
         else:
-            if not SECRETS_PATH.exists():
+            if not sp.exists():
                 raise RuntimeError(_SETUP_HINT)
-            flow = InstalledAppFlow.from_client_secrets_file(str(SECRETS_PATH), SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(str(sp), SCOPES)
             creds = flow.run_local_server(port=0)
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            TOKEN_PATH.write_text(creds.to_json())
+            tp.parent.mkdir(parents=True, exist_ok=True)
+            tp.write_text(creds.to_json())
     return creds
 
 
@@ -77,10 +92,12 @@ def upload_video(
     thumbnail_path: Optional[Path] = None,
     privacy: str = "public",
     category_id: str = "28",
+    secrets_path: Optional[Path] = None,
+    token_path: Optional[Path] = None,
 ) -> str:
     """Upload video to YouTube. Returns watch URL. category 28 = Science & Technology."""
     _, _, _, build, MediaFileUpload = _import_google()
-    creds   = _get_credentials()
+    creds   = _get_credentials(secrets_path=secrets_path, token_path=token_path)
     youtube = build("youtube", "v3", credentials=creds)
 
     body = {
