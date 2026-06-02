@@ -144,21 +144,25 @@ class PipelineTracker:
 
     def complete(self, name: str, detail: str = "", cached: bool = False) -> None:
         s = self._stages[name]
+        # Capture elapsed while still RUNNING, before status changes to DONE/CACHED.
+        # _Stage.tick() only updates elapsed when status == RUNNING.
+        if s._start:
+            s.elapsed = time.time() - s._start
         s.status   = CACHED if cached else DONE
         s.progress = None
-        s.tick()
         if detail:
             s.detail = detail
         self._refresh()
         if self._quiet:
-            icon   = "◉" if cached else "✓"
-            t_str  = f"  {s.elapsed:.1f}s" if s.elapsed > 0 else ""
+            icon  = "◉" if cached else "✓"
+            t_str = f"  {s.elapsed:.1f}s" if s.elapsed > 0 else ""
             print(f"  {icon}  {name:<12}{t_str}  {s.detail}")
 
     def fail(self, name: str, detail: str = "") -> None:
         s = self._stages[name]
+        if s._start:
+            s.elapsed = time.time() - s._start
         s.status = FAILED
-        s.tick()
         if detail:
             s.detail = detail
         self._refresh()
