@@ -1,4 +1,4 @@
-"""OpenRouter client for free-tier LLM calls."""
+"""OpenRouter client for free-tier LLM script generation."""
 import asyncio
 import json
 import os
@@ -9,56 +9,95 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 STYLE_PRESETS: dict[str, str] = {
     "educational": (
-        "Tone: authoritative yet accessible — explain like a knowledgeable friend. "
-        "Pacing: measured and clear. "
-        "Visuals: close-ups of subject, data graphics, diagrams. "
-        "Structure: surprising fact → explanation → implication."
+        "Tone: authoritative yet accessible — explain like a knowledgeable friend who genuinely "
+        "loves the subject. Pacing: measured and clear, one idea per sentence. "
+        "Use analogies to make abstract concepts concrete. "
+        "Visuals: close-ups of subject, data graphics, diagrams, demonstration shots. "
+        "Structure: surprising fact → clear explanation → real-world implication."
     ),
     "dramatic": (
-        "Tone: cinematic, intense, high stakes. Short punchy sentences. Relentless pacing. "
-        "Visuals: extreme angles, dramatic lighting, motion blur, high contrast. "
-        "Structure: escalating tension from hook to climax."
+        "Tone: cinematic, high-stakes. Short punchy sentences. Every line raises the tension. "
+        "Write as if the fate of something important hangs in the balance. "
+        "Visuals: extreme angles, dramatic lighting, motion blur, high contrast, intense close-ups."
+        " "
+        "Structure: devastating hook → escalating revelation → shocking conclusion."
     ),
     "listicle": (
-        "Tone: direct and punchy. Number each point explicitly (1... 2... 3...). Very fast cuts. "
-        "Visuals: bold graphic elements, strong contrast. "
-        "Structure: countdown or ranked list with a payoff at the end."
+        "Tone: direct, punchy, slightly irreverent. Number each point explicitly out loud "
+        "(say 'Number one', 'Number two'). Very fast pacing — one point, one payoff. "
+        "Visuals: bold graphic elements, strong contrast, clear subject per point. "
+        "Structure: tease the best item first, deliver it last — classic countdown payoff."
     ),
     "documentary": (
-        "Tone: journalistic and reflective, like a mini-documentary. "
-        "Deliberate pacing with moments to breathe. "
-        "Visuals: naturalistic, observational, muted colour palette. "
-        "Structure: context → story → insight."
+        "Tone: journalistic and reflective. Measured pacing with room to breathe. "
+        "Write in third person, past tense where appropriate. Use specific proper nouns, "
+        "dates, and named individuals — never vague generalities. "
+        "Visuals: naturalistic, archival-style, muted colour palette, establishing shots. "
+        "Structure: set the scene → tell the story → reveal the significance."
     ),
     "morris": (
         "Tone: Hamilton Morris — empirical, intimate, intellectually precise. "
         "Write in first person as a researcher immersed in the subject. "
         "Use specific chemical names, pharmacological mechanisms, historical dates, and named "
         "researchers. Never sensationalise; let facts carry the weight. "
-        "Sentences are measured and deliberate, occasionally long and clause-heavy when the "
+        "Sentences are measured and deliberate, occasionally long and clause-heavy when "
         "complexity demands it. Personal anecdote and scientific rigour coexist naturally. "
         "Visuals: close macro laboratory shots, archival photographs, molecular structures, "
         "field work scenes. "
         "Structure: personal entry point → historical/chemical deep dive → societal or "
         "philosophical implication → quiet, unresolved conclusion."
     ),
+    "mythology": (
+        "Tone: epic oral tradition — as if an elder is telling a story around a fire. "
+        "Rich, vivid language. Use the present tense for events to create immediacy. "
+        "Name every god, hero, and place specifically. Build wonder without condescension. "
+        "Visuals: ancient art, dramatic landscapes, divine imagery, artifact close-ups. "
+        "Structure: introduce the world → tell the myth → reveal what it means for us today."
+    ),
+    "finance": (
+        "Tone: smart friend who happens to know money — direct, no jargon, no fluff. "
+        "Every claim backed by a specific number or principle. Practical over theoretical. "
+        "Visuals: clean data graphics, relatable everyday situations, dollar amounts on screen. "
+        "Structure: here is the problem most people have → here is why it happens → "
+        "here is exactly what to do instead."
+    ),
+    "horror": (
+        "Tone: slow-burn dread. Understated at first, then escalating. "
+        "Let silence and implication do the work — don't over-explain the scary part. "
+        "Short declarative sentences at peak tension. "
+        "Visuals: low-light environments, isolation, unsettling detail shots, negative space. "
+        "Structure: establish normal → introduce wrongness → let it build → end on ambiguity."
+    ),
+    "curiosity": (
+        "Tone: infectious wonder — you can't believe this is real and you need to share it. "
+        "Open every line with the most interesting possible angle. "
+        "Ask rhetorical questions that the viewer genuinely wants answered. "
+        "Visuals: unexpected juxtapositions, scale-revealing shots, before/after comparisons. "
+        "Structure: impossible-sounding claim → proof it's true → deeper implication → "
+        "what question this raises."
+    ),
 }
 
-# Free models ranked by quality/speed (diverse providers to avoid single-provider rate limits)
-# Benchmark 2026-05-20: gpt-oss-120b was the only model to deliver 839/351 words on ibogaine topic.
-# mistral-small removed (404 dead endpoint). nemotron sometimes returns null content.
+# Free models ranked by quality. Benchmarked 2026-05-20.
 FREE_MODELS = [
-    "openai/gpt-oss-120b:free",                  # OpenAI infra, 131k ctx — best landscape quality
-    "meta-llama/llama-3.3-70b-instruct:free",    # Meta, 128k ctx, reliable for shorts
-    "nousresearch/hermes-3-llama-3.1-405b:free", # Nous, 405B, highest quality when available
-    "nvidia/nemotron-3-super-120b-a12b:free",    # NVIDIA, 262k ctx (sometimes null content)
-    "qwen/qwen3-next-80b-a3b-instruct:free",     # Alibaba, 80B
-    "meta-llama/llama-3.2-3b-instruct:free",     # fast fallback (small)
+    "openai/gpt-oss-120b:free",                  # best landscape quality
+    "meta-llama/llama-3.3-70b-instruct:free",    # reliable for shorts
+    "nousresearch/hermes-3-llama-3.1-405b:free", # highest quality when available
+    "nvidia/nemotron-3-super-120b-a12b:free",    # sometimes returns null content
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "meta-llama/llama-3.2-3b-instruct:free",     # fast fallback
 ]
+
+_RETRIABLE = (
+    "429", "rate", "temporarily", "overloaded",
+    "404", "400", "upstream", "provider", "no endpoints",
+    "unterminated", "jsondecode", "bad request",
+    "developer instruction", "invalid_argument",
+    "timeout", "timed out", "connection",
+)
 
 
 def _strip_fences(raw: str) -> str:
-    """Remove markdown code fences if the LLM wrapped its JSON in them."""
     raw = raw.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
@@ -90,7 +129,7 @@ async def generate_script(
     style: str | None = None,
     mode: str = "shorts",
 ) -> dict:
-    """Try model, fall back through FREE_MODELS list on rate-limit or null response."""
+    """Try model, falling back through FREE_MODELS on rate-limit or null response."""
     models_to_try = [model] + [m for m in FREE_MODELS if m != model]
     client = get_client()
     last_err: Exception | None = None
@@ -100,8 +139,9 @@ async def generate_script(
                 topic, duration=duration, model=m, style=style, mode=mode, client=client
             )
             if result is None:
-                last_err = RuntimeError(f"Model {m} returned empty content")
+                last_err = RuntimeError(f"model {m} returned empty content")
                 continue
+            # Retry once if word count is too low
             min_words = result.get("_min_words")
             if min_words and _count_words(result) < min_words:
                 retry = await _generate_script(
@@ -111,23 +151,14 @@ async def generate_script(
                     result = retry
             return result
         except Exception as e:
-            import json as _json
             msg = str(e).lower()
-            is_rate = any(x in msg for x in ("429", "rate", "temporarily", "overloaded"))
-            _retriable_phrases = (
-                "404", "400", "upstream", "provider", "no endpoints",
-                "unterminated", "jsondecode", "bad request",
-                "developer instruction", "invalid_argument",
-                "timeout", "timed out", "connection",
-            )
             is_retriable = (
-                isinstance(e, _json.JSONDecodeError)
-                or is_rate
-                or any(x in msg for x in _retriable_phrases)
+                isinstance(e, json.JSONDecodeError)
+                or any(x in msg for x in _RETRIABLE)
             )
             if is_retriable:
                 last_err = e
-                if is_rate:
+                if any(x in msg for x in ("429", "rate", "overloaded")):
                     await asyncio.sleep(8)
                 continue
             raise
@@ -141,14 +172,27 @@ async def _generate_script(
     style: str | None = None,
     mode: str = "shorts",
     client: AsyncOpenAI | None = None,
-) -> dict:
+) -> dict | None:
     if client is None:
         client = get_client()
-
     if mode == "landscape":
         return await _generate_landscape_script(
             topic, duration=duration, model=model, style=style, client=client
         )
+    return await _generate_shorts_script(
+        topic, duration=duration, model=model, style=style, client=client
+    )
+
+
+async def _generate_shorts_script(
+    topic: str,
+    duration: int = 45,
+    model: str = FREE_MODELS[0],
+    style: str | None = None,
+    client: AsyncOpenAI | None = None,
+) -> dict | None:
+    if client is None:
+        client = get_client()
 
     system = (
         "You are an expert YouTube Shorts scriptwriter and visual creative director. "
@@ -157,24 +201,17 @@ async def _generate_script(
         "The script must read as a single cohesive story from hook to CTA — "
         "never a collection of disconnected facts. "
         "Output strict JSON only — no markdown fences, no extra text, no comments.\n\n"
-        "CRITICAL — writing visual_prompts:\n"
+        "RULE — writing visual_prompts:\n"
         "Every visual_prompt MUST depict the exact subject named in its segment's narration. "
-        "Name a concrete noun: a specific person, organism, object, location, or action "
-        "from the text. "
-        "Never write a generic atmosphere or landscape prompt unless the narration "
-        "explicitly describes one.\n"
+        "Name a concrete noun: a specific person, organism, object, location, or action. "
+        "Generic atmosphere or abstract scenes are forbidden unless the narration describes them.\n"
         "BAD: 'dramatic sky at sunset, cinematic vertical shot'\n"
-        "GOOD: 'close-up of scientist in white lab coat injecting compound into lab mouse, "
-        "fluorescent laboratory lighting, photorealistic, 8k'\n"
-        "Each prompt must answer: what specific thing from the narration is visible?"
+        "GOOD: 'close-up of Marie Curie in her Paris laboratory, holding a glowing radium "
+        "sample, dramatic side-lighting, photorealistic, 8k'"
     )
     if style and style in STYLE_PRESETS:
-        system += (
-            f"\n\nSTYLE DIRECTIVE — apply this tone and structure throughout:"
-            f"\n{STYLE_PRESETS[style]}"
-        )
+        system += f"\n\nSTYLE DIRECTIVE:\n{STYLE_PRESETS[style]}"
 
-    # YouTube Shorts are best under 50s to avoid the 60s hard limit.
     target_dur = min(duration, 50)
     n_segments = max(4, target_dur // 8)
 
@@ -184,47 +221,42 @@ Return JSON with exactly this shape:
 {{
   "title": "punchy curiosity-gap title, 5-8 words",
   "hook": {{
-    "text": "1 complete sentence — shocking stat or question that sets up the story",
-    "visual_prompts": ["AI image prompt for the hook"]
+    "text": "1 sentence — shocking stat or question that sets up the story",
+    "visual_prompts": ["specific AI image prompt for the hook"]
   }},
   "segments": [
     {{
-      "text": "1-3 complete sentences continuing directly from the previous segment",
+      "text": "1-3 sentences continuing directly from the previous segment",
       "visual_prompts": [
-        "AI image prompt 1 (highly specific: subject, action, framing, lighting, 8k, cinematic)",
-        "AI image prompt 2 (variation: different angle or detail of the same scene)"
+        "highly specific prompt: subject, action, framing, lighting, 8k, cinematic",
+        "second prompt: different angle or detail of the same scene"
       ]
     }}
   ],
   "cta": {{
-    "text": "1-2 sentences wrapping up the story, ending with a question about what was covered",
-    "visual_prompts": ["AI image prompt for the CTA"]
+    "text": "1-2 sentences wrapping the story, ending with a question",
+    "visual_prompts": ["specific AI image prompt for the CTA"]
   }},
   "viral_package": {{
     "hashtags": ["#tag1", "#tag2", "#tag3"],
     "description": "100-character description for upload",
-    "thumbnail_prompt": "High-contrast thumbnail prompt, bold text, viral style"
+    "thumbnail_prompt": "High-contrast thumbnail, bold text, viral style"
   }}
 }}
 
-Requirements:
-- Produce exactly {n_segments} segments.
-- Total narration word count MUST be under 130 words.
-- All text MUST be complete sentences — never truncate mid-thought to hit a word count.
-- Each segment MUST have 2 distinct "visual_prompts".
-- Hook and CTA MUST each have 1 distinct "visual_prompts".
-- Every visual_prompt MUST name the specific subject from that segment's narration text.
-  Generic atmosphere, cityscapes, or abstract scenes are forbidden unless the narration
-  explicitly describes them.
-- Segments MUST form a continuous narrative — each picks up directly where the last left off.
-- The hook MUST introduce the central question or tension the segments resolve.
-- The CTA MUST feel like a natural conclusion to the story — not a detached call to action.
+Hard requirements:
+- Exactly {n_segments} segments.
+- Total narration MUST be under 130 words.
+- All text must be complete sentences — never truncate mid-thought.
+- Each segment needs exactly 2 visual_prompts; hook and CTA need exactly 1.
+- Every prompt names the specific subject from that segment's narration.
+- Segments form a continuous narrative — each picks up where the last left off.
 - Script language: active voice, second person ("you"), present tense."""
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.7,
+        temperature=0.72,
         max_tokens=3500,
         timeout=60,
     )
@@ -240,73 +272,68 @@ async def _generate_landscape_script(
     model: str = FREE_MODELS[0],
     style: str | None = None,
     client: AsyncOpenAI | None = None,
-) -> dict:
-    """Generate a script for a landscape (16:9) YouTube video up to 10 minutes."""
+) -> dict | None:
+    """Generate a landscape (16:9) script up to 10 minutes long."""
     if client is None:
         client = get_client()
 
     system = (
-        "You are an expert YouTube video scriptwriter and visual creative director. "
-        "You craft well-paced, engaging landscape (16:9) YouTube videos "
-        "with precise cinematic visual direction. "
-        "The script must read as a single cohesive story from hook to CTA — "
-        "never a collection of disconnected facts. "
+        "You are an expert YouTube scriptwriter producing substantial, well-paced "
+        "landscape (16:9) videos. Every video must have the density and craft of "
+        "a professional documentary or explainer — not thin filler. "
         "Output strict JSON only — no markdown fences, no extra text, no comments.\n\n"
-        "CRITICAL — writing visual_prompts:\n"
+        "RULE — writing visual_prompts:\n"
         "Every visual_prompt MUST depict the exact subject named in its segment's narration. "
-        "Name a concrete noun: a specific person, organism, object, location, or action "
-        "from the text. "
-        "Never write a generic atmosphere or landscape prompt unless the narration "
-        "explicitly describes one.\n"
-        "BAD: 'dramatic sky at sunset, cinematic wide shot'\n"
-        "GOOD: 'close-up of scientist in white lab coat examining compound under microscope, "
-        "fluorescent laboratory lighting, photorealistic, 8k'\n"
-        "Each prompt must answer: what specific thing from the narration is visible?"
+        "Name a concrete noun: a specific person, object, location, or action. "
+        "Generic landscapes or abstract scenes are forbidden unless the narration describes them.\n"
+        "BAD: 'dramatic wide shot of mountains'\n"
+        "GOOD: 'wide shot of Gallipoli beach at dawn showing Allied troops landing on shore, "
+        "documentary cinematography, muted tones, photorealistic, 8k'"
     )
     if style and style in STYLE_PRESETS:
-        system += (
-            f"\n\nSTYLE DIRECTIVE — apply this tone and structure throughout:"
-            f"\n{STYLE_PRESETS[style]}"
-        )
+        system += f"\n\nSTYLE DIRECTIVE:\n{STYLE_PRESETS[style]}"
 
     target_dur = min(duration, 600)
-    # edge-tts GuyNeural at +0% rate ≈ 130 WPM (deliberate documentary pacing)
-    words_per_min = 130
-    target_words = int(target_dur / 60 * words_per_min)
-    min_words = int(target_words * 0.90)
-    # one segment every ~22 seconds gives good visual rhythm
-    n_segments = max(10, target_dur // 22)
-    seg_min = max(60, target_words // (n_segments + 2))  # +2 for hook+cta
-    seg_max = seg_min + 30
+    words_per_min = 130          # edge-tts GuyNeural at +0% ≈ 130 WPM
+    target_words  = int(target_dur / 60 * words_per_min)
+    min_words     = int(target_words * 0.88)
+    n_segments    = max(10, target_dur // 22)   # visual cut every ~22s
+    seg_min       = max(55, target_words // (n_segments + 2))
+    seg_max       = seg_min + 35
 
     user = f"""Write a YouTube video script about: "{topic}"
-Target duration: {target_dur} seconds ({target_dur // 60}m {target_dur % 60}s).
-This script will be read aloud at approximately {words_per_min} words per minute.
+Target duration: {target_dur}s ({target_dur // 60}m {target_dur % 60}s).
+Read aloud at approximately {words_per_min} words per minute.
 
 Return JSON with exactly this shape:
 {{
-  "title": "descriptive, search-optimised title, 6-10 words",
+  "title": "search-optimised title, 6-10 words",
   "hook": {{
-    "text": "EXACTLY 60-80 words. 3-4 complete sentences introducing the central question.",
+    "text": "EXACTLY 65-85 words. 4-5 complete sentences. "
+            "Open with the single most striking or counterintuitive fact about this topic. "
+            "End with the central question the video will answer.",
     "visual_prompts": [
-      "AI image prompt — wide establishing shot, cinematic, 8k",
-      "AI image prompt — close detail or reaction shot"
+      "wide establishing shot — cinematic, 8k",
+      "close detail or reaction shot"
     ]
   }},
   "segments": [
     {{
-      "text": "EXACTLY {seg_min}-{seg_max} words. 4-6 sentences. Dense prose, no padding.",
+      "text": "EXACTLY {seg_min}-{seg_max} words. 4-6 dense sentences. No padding. "
+              "Each sentence must advance the story or add a specific new fact.",
       "visual_prompts": [
-        "AI image prompt 1 (highly specific: subject, action, framing, lighting, 8k, cinematic)",
-        "AI image prompt 2 (different angle or complementary detail)"
+        "highly specific prompt: subject, action, framing, lighting, 8k, cinematic",
+        "different angle or complementary detail of the same subject"
       ]
     }}
   ],
   "cta": {{
-    "text": "EXACTLY 50-70 words. 3-4 sentences. Conclude, call back to hook, end with a question.",
+    "text": "EXACTLY 50-70 words. 3-4 sentences. "
+            "Summarise the core insight. Call back to the hook. "
+            "End with a specific question that invites debate in the comments.",
     "visual_prompts": [
-      "AI image prompt — warm conclusive wide shot",
-      "AI image prompt — close call-to-action graphic style"
+      "warm conclusive wide shot",
+      "close call-to-action graphic style"
     ]
   }},
   "viral_package": {{
@@ -316,28 +343,23 @@ Return JSON with exactly this shape:
   }}
 }}
 
-CRITICAL WORD COUNT REQUIREMENTS — these are hard constraints, not suggestions:
-- Produce EXACTLY {n_segments} segments.
-- Each segment text MUST be {seg_min}-{seg_max} words. Count carefully before writing.
-- Hook text MUST be 60-80 words.
-- CTA text MUST be 50-70 words.
-- Total narration word count (hook + all segments + cta) MUST be at least {min_words} words.
-- A short segment is a failure. Dense, substantive prose is required — not thin summaries.
-- All text MUST be complete sentences — never truncate mid-thought.
-- Each segment MUST have 2 distinct "visual_prompts".
-- Hook MUST have 2 visual_prompts. CTA MUST have 2 visual_prompts.
-- Every visual_prompt MUST name the specific subject from that segment's narration text.
-  Generic atmosphere, cityscapes, or abstract scenes are forbidden unless the narration
-  explicitly describes them.
-- Segments MUST form a continuous narrative — each picks up directly where the last left off.
-- Structure: setup → development → payoff → conclusion across the segments.
-- Script MUST conclude with a specific comment-driving question in the CTA."""
+HARD CONSTRAINTS — failure to meet these is a broken response:
+- Exactly {n_segments} segments.
+- Each segment: EXACTLY {seg_min}–{seg_max} words. Count before writing.
+- Hook: EXACTLY 65–85 words.
+- CTA: EXACTLY 50–70 words.
+- Total word count (hook + segments + cta) MUST be ≥ {min_words} words.
+- All text is complete sentences — no truncation.
+- Hook has 2 visual_prompts; each segment has 2; CTA has 2.
+- Every visual_prompt names the specific subject from that segment's narration.
+- Segments form a continuous narrative with clear setup → development → payoff → conclusion.
+- CTA ends with a specific comment-driving question."""
 
     resp = await client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.7,
-        max_tokens=12000,
+        temperature=0.68,
+        max_tokens=14000,
         timeout=120,
     )
     content = resp.choices[0].message.content
@@ -345,5 +367,5 @@ CRITICAL WORD COUNT REQUIREMENTS — these are hard constraints, not suggestions
         return None
     result = json.loads(_strip_fences(content))
     result["_target_words"] = target_words
-    result["_min_words"] = min_words
+    result["_min_words"]    = min_words
     return result

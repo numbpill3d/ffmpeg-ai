@@ -1,4 +1,4 @@
-"""Channel profile loading, saving, and preset definitions."""
+"""Channel profile loading, saving, validation, and preset definitions."""
 from __future__ import annotations
 
 import json
@@ -24,9 +24,12 @@ class ChannelConfig:
     landscape_duration: int = 300
     upload: bool = False
     privacy: str = "public"
+    publish_hour: int = 12        # hour (0–23 local) to schedule uploads
     category_id: str = "28"
     youtube_secrets: Optional[str] = None
     youtube_token: Optional[str] = None
+
+    # ── Persistence ───────────────────────────────────────────────────────────
 
     @classmethod
     def load(cls, name: str) -> "ChannelConfig":
@@ -36,7 +39,9 @@ class ChannelConfig:
                 f"channel '{name}' not found — run: ffmpeg-ai channel init-presets"
             )
         data = json.loads(path.read_text())
-        return cls(**data)
+        # Forward-compat: ignore unknown keys so old configs survive new fields
+        known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def save(self) -> None:
         CHANNELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,25 +54,61 @@ class ChannelConfig:
             return []
         return sorted(p.stem for p in CHANNELS_DIR.glob("*.json"))
 
+    # ── Validation ────────────────────────────────────────────────────────────
+
+    def validate(self) -> list[str]:
+        """Return a list of error strings; empty means valid."""
+        from ..ai.openrouter import STYLE_PRESETS
+        from ..ai.tts import VOICES
+        errors: list[str] = []
+        if not self.name or not self.name.replace("-", "").replace("_", "").isalnum():
+            errors.append("name must be alphanumeric (hyphens/underscores allowed)")
+        if self.style and self.style not in STYLE_PRESETS:
+            errors.append(f"unknown style '{self.style}' — choose from: {', '.join(STYLE_PRESETS)}")
+        if self.voice and self.voice not in VOICES:
+            errors.append(f"unknown voice '{self.voice}' — choose from: {', '.join(VOICES)}")
+        if not 0 <= self.publish_hour <= 23:
+            errors.append(f"publish_hour must be 0–23, got {self.publish_hour}")
+        if self.privacy not in ("public", "unlisted", "private"):
+            errors.append(f"privacy must be public/unlisted/private, got '{self.privacy}'")
+        if self.shorts_duration < 10 or self.shorts_duration > 58:
+            errors.append(f"shorts_duration must be 10–58s, got {self.shorts_duration}")
+        if self.landscape_duration < 60 or self.landscape_duration > 600:
+            errors.append(f"landscape_duration must be 60–600s, got {self.landscape_duration}")
+        if not self.sources:
+            errors.append("at least one source is required")
+        return errors
+
+    # ── Credential paths ──────────────────────────────────────────────────────
+
     @property
-    def secrets_path(self) -> Optional[Path]:
+    def secrets_path(self) -> Path:
         if self.youtube_secrets:
             return Path(self.youtube_secrets).expanduser()
         return CHANNELS_DIR / self.name / "client_secrets.json"
 
     @property
-    def token_path(self) -> Optional[Path]:
+    def token_path(self) -> Path:
         if self.youtube_token:
             return Path(self.youtube_token).expanduser()
         return CHANNELS_DIR / self.name / "token.json"
 
+    @property
+    def run_log_path(self) -> Path:
+        return CHANNELS_DIR / self.name / "run_history.jsonl"
 
-# Built-in channel presets — install via: ffmpeg-ai channel init-presets
+    @property
+    def is_youtube_configured(self) -> bool:
+        return self.token_path.exists()
+
+
+# ── Built-in presets ──────────────────────────────────────────────────────────
+
 PRESETS: list[dict] = [
     {
         "name": "tech",
         "display_name": "Tech Facts Daily",
-        "niche": "technology, AI, programming, software engineering, developer tools",
+        "niche": "technology, AI, programming, developer tools, software engineering",
         "audience": "software developers, makers, self-taught coders, tech enthusiasts",
         "style": "educational",
         "voice": "en-female",
@@ -78,7 +119,8 @@ PRESETS: list[dict] = [
             "reddit:artificial",
             "hn:AI tools",
             "hn:programming",
-            "hn:developer tools",
+            "rss:https://feeds.arstechnica.com/arstechnica/index",
+            "rss:https://lobste.rs/rss",
         ],
         "shorts_per_day": 1,
         "landscape_per_week": 1,
@@ -86,6 +128,7 @@ PRESETS: list[dict] = [
         "landscape_duration": 300,
         "upload": False,
         "privacy": "public",
+        "publish_hour": 12,
         "category_id": "28",
         "youtube_secrets": None,
         "youtube_token": None,
@@ -94,16 +137,18 @@ PRESETS: list[dict] = [
         "name": "history",
         "display_name": "History Uncovered",
         "niche": "world history, ancient civilizations, historical events, forgotten figures",
-        "audience": "history enthusiasts, students, curious learners",
+        "audience": "history enthusiasts, curious learners, students",
         "style": "documentary",
-        "voice": "en-male",
+        "voice": "en-documentary",
         "sources": [
             "wiki:random",
             "wiki:featured",
+            "wiki:onthisday",
             "wiki:category:Ancient history",
-            "wiki:category:Wars",
+            "wiki:category:Wars involving the United States",
             "reddit:history",
             "reddit:AskHistorians",
+            "rss:https://www.smithsonianmag.com/rss/latest_articles/",
         ],
         "shorts_per_day": 1,
         "landscape_per_week": 1,
@@ -111,6 +156,7 @@ PRESETS: list[dict] = [
         "landscape_duration": 480,
         "upload": False,
         "privacy": "public",
+        "publish_hour": 10,
         "category_id": "27",
         "youtube_secrets": None,
         "youtube_token": None,
@@ -118,20 +164,20 @@ PRESETS: list[dict] = [
     {
         "name": "science",
         "display_name": "Mind Blown Science",
-        "niche": "science, space, physics, biology, nature, discoveries",
-        "audience": "science fans, curious people, students",
+        "niche": "science, space, physics, biology, nature, discoveries, research",
+        "audience": "science fans, curious people, students, nature lovers",
         "style": "dramatic",
-        "voice": "en-female",
+        "voice": "en-male",
         "sources": [
             "wiki:random",
             "wiki:featured",
             "wiki:category:Physics",
             "wiki:category:Biology",
+            "wiki:category:Astronomy",
             "reddit:science",
             "reddit:space",
-            "reddit:biology",
-            "hn:space",
-            "hn:biology",
+            "rss:https://www.sciencedaily.com/rss/all.xml",
+            "rss:https://www.nasa.gov/rss/dyn/breaking_news.rss",
         ],
         "shorts_per_day": 1,
         "landscape_per_week": 1,
@@ -139,7 +185,86 @@ PRESETS: list[dict] = [
         "landscape_duration": 360,
         "upload": False,
         "privacy": "public",
+        "publish_hour": 14,
         "category_id": "28",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    {
+        "name": "mythology",
+        "display_name": "Myths and Legends",
+        "niche": "mythology, folklore, ancient gods, legends, cultural stories worldwide",
+        "audience": "mythology fans, fantasy readers, history buffs, storytelling enthusiasts",
+        "style": "documentary",
+        "voice": "en-storyteller",
+        "sources": [
+            "wiki:category:Greek mythology",
+            "wiki:category:Norse mythology",
+            "wiki:category:Egyptian mythology",
+            "wiki:random",
+            "reddit:mythology",
+            "reddit:folklore",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 50,
+        "landscape_duration": 420,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 11,
+        "category_id": "27",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    {
+        "name": "mindset",
+        "display_name": "Stoic Mind",
+        "niche": "stoicism, philosophy, mindset, self-improvement, ancient wisdom",
+        "audience": "self-improvement seekers, philosophy students, professionals",
+        "style": "educational",
+        "voice": "en-documentary",
+        "sources": [
+            "wiki:category:Stoicism",
+            "wiki:category:Ancient Greek philosophy",
+            "wiki:random",
+            "reddit:Stoicism",
+            "reddit:philosophy",
+            "reddit:selfimprovement",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 45,
+        "landscape_duration": 300,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 7,
+        "category_id": "27",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    {
+        "name": "finance",
+        "display_name": "Money Decoded",
+        "niche": "personal finance, investing, wealth building, economics, money psychology",
+        "audience": "young adults, aspiring investors, professionals managing money",
+        "style": "educational",
+        "voice": "en-energetic",
+        "sources": [
+            "reddit:personalfinance",
+            "reddit:investing",
+            "reddit:financialindependence",
+            "hn:finance",
+            "hn:investing",
+            "rss:https://feeds.feedburner.com/PennyHoarder",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 45,
+        "landscape_duration": 300,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 9,
+        "category_id": "27",
         "youtube_secrets": None,
         "youtube_token": None,
     },

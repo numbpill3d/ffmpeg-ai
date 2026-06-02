@@ -1,4 +1,8 @@
-"""YouTube Data API v3 — OAuth2 setup and video upload."""
+"""YouTube Data API v3 — OAuth2 setup, upload, and scheduled publishing."""
+from __future__ import annotations
+
+import datetime
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -14,9 +18,14 @@ Setup (one time):
   1. console.cloud.google.com → APIs & Services → Enable "YouTube Data API v3"
   2. Credentials → Create → OAuth 2.0 Client ID → Desktop app
   3. Download JSON → save to:
-       ~/.config/ffmpeg-ai/client_secrets.json
-  4. Run:  ffmpeg-ai youtube-setup
+       {secrets_path}
+  4. Run:  ffmpeg-ai youtube-setup   (or: ffmpeg-ai channel setup-yt <name>)
 """
+
+# Quota cost per upload is 1600 units; daily free quota is 10,000 units (~6 uploads/day).
+# Resumable uploads occasionally fail transiently — retry up to this many times.
+_UPLOAD_RETRIES = 3
+_RETRY_BACKOFF  = (5, 15, 45)   # seconds between attempts
 
 
 def _import_google():
@@ -38,21 +47,21 @@ def is_configured(
     secrets_path: Optional[Path] = None,
     token_path: Optional[Path] = None,
 ) -> bool:
-    sp = secrets_path or SECRETS_PATH
+    """True only if a valid token exists (secrets alone is not enough)."""
     tp = token_path or TOKEN_PATH
-    return tp.exists() or sp.exists()
+    return tp.exists()
 
 
 def setup_oauth(
     secrets_path: Optional[Path] = None,
     token_path: Optional[Path] = None,
 ) -> None:
-    """Run interactive OAuth flow and save credentials. Call once."""
+    """Run interactive OAuth2 flow and save credentials. Call once per channel."""
     sp = secrets_path or SECRETS_PATH
     tp = token_path or TOKEN_PATH
     Credentials, InstalledAppFlow, Request, _, _ = _import_google()
     if not sp.exists():
-        raise RuntimeError(_SETUP_HINT)
+        raise RuntimeError(_SETUP_HINT.format(secrets_path=sp))
     flow = InstalledAppFlow.from_client_secrets_file(str(sp), SCOPES)
     creds = flow.run_local_server(port=0)
     tp.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +85,7 @@ def _get_credentials(
             tp.write_text(creds.to_json())
         else:
             if not sp.exists():
-                raise RuntimeError(_SETUP_HINT)
+                raise RuntimeError(_SETUP_HINT.format(secrets_path=sp))
             flow = InstalledAppFlow.from_client_secrets_file(str(sp), SCOPES)
             creds = flow.run_local_server(port=0)
             tp.parent.mkdir(parents=True, exist_ok=True)
@@ -94,11 +103,26 @@ def upload_video(
     category_id: str = "28",
     secrets_path: Optional[Path] = None,
     token_path: Optional[Path] = None,
+    publish_at: Optional[datetime.datetime] = None,
 ) -> str:
-    """Upload video to YouTube. Returns watch URL. category 28 = Science & Technology."""
+    """Upload a video to YouTube and return its watch URL.
+
+    publish_at:  if set, video is uploaded as private and scheduled to go
+                 public at this UTC datetime. Requires privacy="private".
+    category_id: 27=Education, 28=Science & Technology
+    """
     _, _, _, build, MediaFileUpload = _import_google()
     creds   = _get_credentials(secrets_path=secrets_path, token_path=token_path)
     youtube = build("youtube", "v3", credentials=creds)
+
+    effective_privacy = "private" if publish_at else privacy
+    status_body: dict = {
+        "privacyStatus":          effective_privacy,
+        "selfDeclaredMadeForKids": False,
+    }
+    if publish_at:
+        # YouTube requires RFC 3339 with explicit UTC suffix
+        status_body["publishAt"] = publish_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     body = {
         "snippet": {
@@ -107,25 +131,49 @@ def upload_video(
             "tags":        [t.lstrip("#") for t in tags][:500],
             "categoryId":  category_id,
         },
-        "status": {
-            "privacyStatus":          privacy,
-            "selfDeclaredMadeForKids": False,
-        },
+        "status": status_body,
     }
 
-    media   = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
-    request = youtube.videos().insert(part=",".join(body.keys()), body=body, media_body=media)
+    media = MediaFileUpload(str(video_path), mimetype="video/mp4", resumable=True)
 
-    response = None
-    while response is None:
-        _, response = request.next_chunk()
-
-    video_id = response["id"]
+    last_err: Exception | None = None
+    for attempt in range(_UPLOAD_RETRIES):
+        try:
+            request  = youtube.videos().insert(
+                part=",".join(body.keys()), body=body, media_body=media
+            )
+            response = None
+            while response is None:
+                _, response = request.next_chunk()
+            video_id = response["id"]
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < _UPLOAD_RETRIES - 1:
+                time.sleep(_RETRY_BACKOFF[attempt])
+            else:
+                raise RuntimeError(
+                    f"upload failed after {_UPLOAD_RETRIES} attempts: {last_err}"
+                ) from last_err
 
     if thumbnail_path and thumbnail_path.exists():
-        youtube.thumbnails().set(
-            videoId=video_id,
-            media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg"),
-        ).execute()
+        try:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(thumbnail_path), mimetype="image/jpeg"),
+            ).execute()
+        except Exception:
+            pass  # thumbnail failure is non-fatal
 
     return f"https://youtu.be/{video_id}"
+
+
+def next_publish_time(publish_hour: int) -> datetime.datetime:
+    """Return the next UTC datetime for publish_hour (local time → UTC)."""
+    now_local = datetime.datetime.now()
+    target = now_local.replace(hour=publish_hour, minute=0, second=0, microsecond=0)
+    if target <= now_local:
+        target += datetime.timedelta(days=1)
+    # Convert local → UTC (best-effort without tz database)
+    utc_offset = datetime.datetime.utcnow() - now_local
+    return target + utc_offset

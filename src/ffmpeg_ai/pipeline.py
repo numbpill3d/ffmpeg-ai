@@ -22,7 +22,7 @@ from .ui.display import console
 from .ui.widgets import PipelineTracker, stats_table
 from .ai.openrouter import generate_script, FREE_MODELS
 from .ai.images import generate_images, load_user_images
-from .ai.tts import synthesize, DEFAULT_VOICE
+from .ai.tts import synthesize, DEFAULT_VOICE, rate_for_mode
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
     merge_audio, mix_music, burn_captions, encode_video, get_audio_duration,
@@ -199,7 +199,7 @@ async def run_pipeline(
         tts_dir.mkdir(parents=True, exist_ok=True)
         img_dir.mkdir(parents=True, exist_ok=True)
 
-        tts_rate = "+0%" if mode == "landscape" else "+10%"
+        tts_rate = rate_for_mode(mode)
         tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
 
         async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:

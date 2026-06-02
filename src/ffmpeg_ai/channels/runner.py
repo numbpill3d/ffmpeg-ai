@@ -1,6 +1,7 @@
-"""Orchestrate a full channel run: harvest → generate → upload."""
+"""Orchestrate a full channel run: harvest → generate → upload → log."""
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import re
@@ -10,7 +11,7 @@ from typing import Optional
 from ..ai.openrouter import FREE_MODELS
 from ..ai.tts import VOICES
 from ..auto.harvest import harvest_for_channel, save_seen
-from ..auto.youtube import upload_video, is_configured
+from ..auto.youtube import next_publish_time, upload_video
 from ..pipeline import run_pipeline
 from ..ui.display import console
 from .config import ChannelConfig
@@ -26,70 +27,161 @@ def _out_dir(channel: ChannelConfig) -> Path:
     return Path.home() / "Videos" / "ffmpeg-ai" / channel.name
 
 
-def _load_viral(topic: str) -> dict:
-    job_dir = _JOB_CACHE / _slug(topic)
-    script_p = job_dir / "script.json"
-    if script_p.exists():
-        return json.loads(script_p.read_text()).get("viral_package", {})
-    return {}
+def _load_script(topic: str) -> dict:
+    return json.loads((_JOB_CACHE / _slug(topic) / "script.json").read_text())
 
 
-def _do_upload(
+def _script_title(topic: str) -> str:
+    try:
+        return _load_script(topic).get("title", topic)
+    except Exception:
+        return topic
+
+
+def _viral(topic: str) -> dict:
+    try:
+        return _load_script(topic).get("viral_package", {})
+    except Exception:
+        return {}
+
+
+# ── Run logging ───────────────────────────────────────────────────────────────
+
+def _append_run_log(channel: ChannelConfig, entry: dict) -> None:
+    channel.run_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with channel.run_log_path.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def read_run_log(channel: ChannelConfig, limit: int = 20) -> list[dict]:
+    """Return the most recent `limit` run entries for a channel."""
+    if not channel.run_log_path.exists():
+        return []
+    lines = channel.run_log_path.read_text().splitlines()
+    entries: list[dict] = []
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception:
+            continue
+        if len(entries) >= limit:
+            break
+    return entries
+
+
+# ── Upload (blocking → async via thread) ─────────────────────────────────────
+
+async def _upload(
     channel: ChannelConfig,
     topic: str,
     out: Path,
-    script_title: str,
 ) -> Optional[str]:
-    viral = _load_viral(topic)
-    title = script_title or topic
+    """Non-blocking upload. Returns URL or None on failure."""
+    viral = _viral(topic)
+    title = _script_title(topic)
     desc  = viral.get("description") or f"{topic} #{channel.name}"
     tags  = viral.get("hashtags") or [f"#{channel.name}"]
     thumb = out.with_suffix(".thumb.jpg")
 
+    publish_at: Optional[datetime.datetime] = None
+    if channel.publish_hour is not None and channel.privacy == "public":
+        publish_at = next_publish_time(channel.publish_hour)
+
     console.print(f"[cyan]uploading:[/] {title}")
-    url = upload_video(
-        video_path=out,
-        title=title,
-        description=desc,
-        tags=tags,
-        thumbnail_path=thumb if thumb.exists() else None,
-        privacy=channel.privacy,
-        category_id=channel.category_id,
-        secrets_path=channel.secrets_path,
-        token_path=channel.token_path,
-    )
-    return url
+    if publish_at:
+        console.print(f"[dim]  scheduled publish: {publish_at.strftime('%Y-%m-%d %H:%M UTC')}[/]")
+
+    try:
+        url = await asyncio.to_thread(
+            upload_video,
+            video_path=out,
+            title=title,
+            description=desc,
+            tags=tags,
+            thumbnail_path=thumb if thumb.exists() else None,
+            privacy=channel.privacy,
+            category_id=channel.category_id,
+            secrets_path=channel.secrets_path,
+            token_path=channel.token_path,
+            publish_at=publish_at,
+        )
+        console.print(f"[bold green]✓[/] {url}")
+        return url
+    except Exception as e:
+        console.print(f"[bold red]✗[/] upload failed: {e}")
+        return None
 
 
-async def _get_script_title(topic: str) -> str:
-    job_dir = _JOB_CACHE / _slug(topic)
-    script_p = job_dir / "script.json"
-    if script_p.exists():
-        return json.loads(script_p.read_text()).get("title", topic)
-    return topic
+# ── Single video generation ───────────────────────────────────────────────────
 
+async def _generate_one(
+    channel: ChannelConfig,
+    topic: str,
+    mode: str,
+    out: Path,
+    model: str,
+    quiet: bool,
+    fresh: bool,
+) -> bool:
+    """Generate one video. Returns True on success."""
+    selected_voice = VOICES.get(channel.voice, channel.voice)
+    duration = channel.shorts_duration if mode == "shorts" else channel.landscape_duration
+    label = "short" if mode == "shorts" else "long-form"
+    console.print(f"\n[bold cyan]── {label}: {topic} ──[/]")
+    try:
+        await run_pipeline(
+            topic=topic,
+            output_path=out,
+            mode=mode,
+            duration=duration,
+            model=model,
+            voice=selected_voice,
+            style=channel.style,
+            quiet=quiet,
+            thumbnail=True,
+            fresh=fresh,
+        )
+        return True
+    except Exception as e:
+        console.print(f"[bold red]✗[/] {label} generation failed: {e}")
+        return False
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
 
 async def run_channel(
     channel: ChannelConfig,
     shorts: bool = True,
     landscape: bool = True,
-    upload: bool | None = None,
+    upload: Optional[bool] = None,
     count: int = 1,
     quiet: bool = False,
     model: str = FREE_MODELS[0],
+    dry_run: bool = False,
 ) -> dict:
-    """Run a full channel cycle. Returns summary dict."""
+    """Run a full channel cycle. Returns a summary dict."""
     should_upload = upload if upload is not None else channel.upload
     out_dir = _out_dir(channel)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(f"\n[bold cyan]channel:[/] {channel.display_name}")
-    console.print(f"  niche:   {channel.niche[:60]}")
-    console.print(f"  style:   {channel.style}   voice: {channel.voice}")
-    console.print(f"  upload:  {should_upload}")
+    console.print(f"  niche:  {channel.niche[:70]}")
+    console.print(f"  style:  {channel.style}   voice: {channel.voice}")
+    if should_upload:
+        status = (
+            "[green]enabled[/]" if channel.is_youtube_configured
+            else "[yellow]enabled but YouTube not configured[/]"
+        )
+        console.print(f"  upload: {status}")
+    else:
+        console.print("  upload: [dim]disabled[/]")
 
-    # Topic harvest
+    # ── Topic harvest ─────────────────────────────────────────────────────────
     console.print(f"\n[bold cyan]harvesting {count} topic(s)…[/]")
+    start = datetime.datetime.now()
+
     topics = await harvest_for_channel(
         sources=channel.sources,
         niche=channel.niche,
@@ -99,87 +191,75 @@ async def run_channel(
     )
 
     if not topics:
-        console.print("[bold red]no topics harvested — try again later[/]")
+        console.print("[bold red]no topics harvested — all sources returned nothing[/]")
         return {"channel": channel.name, "topics": [], "generated": [], "uploaded": []}
 
     console.print("[green]topics:[/]")
     for t in topics:
         console.print(f"  • {t}")
 
+    if dry_run:
+        console.print("\n[dim]dry-run — stopping before generation[/]")
+        return {"channel": channel.name, "topics": topics, "generated": [], "uploaded": []}
+
     save_seen(topics, channel_name=channel.name)
 
-    selected_voice = VOICES.get(channel.voice, channel.voice)
+    out_dir.mkdir(parents=True, exist_ok=True)
     generated: list[dict] = []
 
     for topic in topics:
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
 
+        # Short first — uses a fresh script (new generation each run)
         if shorts:
-            console.print(f"\n[bold cyan]── short: {topic} ──[/]")
             out = out_dir / f"{ts}_{slug}_short.mp4"
-            try:
-                await run_pipeline(
-                    topic=topic,
-                    output_path=out,
-                    mode="shorts",
-                    duration=channel.shorts_duration,
-                    model=model,
-                    voice=selected_voice,
-                    style=channel.style,
-                    quiet=quiet,
-                    thumbnail=True,
-                )
-                title = await _get_script_title(topic)
-                entry = {"topic": topic, "mode": "short", "path": str(out), "url": None}
-                if should_upload and is_configured(channel.secrets_path, channel.token_path):
-                    try:
-                        url = _do_upload(channel, topic, out, title)
-                        entry["url"] = url
-                        console.print(f"[bold green]✓[/] {url}")
-                    except Exception as e:
-                        console.print(f"[bold red]✗[/] upload failed: {e}")
-                generated.append(entry)
-            except Exception as e:
-                console.print(f"[bold red]✗[/] short failed: {e}")
+            ok  = await _generate_one(
+                channel, topic, "shorts", out, model, quiet, fresh=True,
+            )
+            if ok:
+                url = await _upload(channel, topic, out) if (
+                    should_upload and channel.is_youtube_configured
+                ) else None
+                generated.append({
+                    "topic": topic, "mode": "short",
+                    "path": str(out), "url": url,
+                    "ts": ts,
+                })
 
+        # Landscape second — must be fresh so the pipeline generates the longer script
+        # rather than reusing the shorts-format script.json from the same topic slug.
         if landscape:
-            console.print(f"\n[bold cyan]── long-form: {topic} ──[/]")
             out_l = out_dir / f"{ts}_{slug}_landscape.mp4"
-            try:
-                await run_pipeline(
-                    topic=topic,
-                    output_path=out_l,
-                    mode="landscape",
-                    duration=channel.landscape_duration,
-                    model=model,
-                    voice=selected_voice,
-                    style=channel.style,
-                    quiet=quiet,
-                    thumbnail=True,
-                    fresh=True,
-                )
-                title = await _get_script_title(topic)
-                entry = {"topic": topic, "mode": "landscape", "path": str(out_l), "url": None}
-                if should_upload and is_configured(channel.secrets_path, channel.token_path):
-                    try:
-                        url = _do_upload(channel, topic, out_l, title)
-                        entry["url"] = url
-                        console.print(f"[bold green]✓[/] {url}")
-                    except Exception as e:
-                        console.print(f"[bold red]✗[/] upload failed: {e}")
-                generated.append(entry)
-            except Exception as e:
-                console.print(f"[bold red]✗[/] landscape failed: {e}")
+            ok    = await _generate_one(
+                channel, topic, "landscape", out_l, model, quiet, fresh=True,
+            )
+            if ok:
+                url = await _upload(channel, topic, out_l) if (
+                    should_upload and channel.is_youtube_configured
+                ) else None
+                generated.append({
+                    "topic": topic, "mode": "landscape",
+                    "path": str(out_l), "url": url,
+                    "ts": ts,
+                })
 
     uploaded = [g for g in generated if g.get("url")]
+    elapsed  = (datetime.datetime.now() - start).seconds
+
     console.print(
-        f"\n[bold green]done[/] — {len(generated)} video(s) generated"
+        f"\n[bold green]done[/] — {len(generated)} video(s) in {elapsed}s"
         + (f", {len(uploaded)} uploaded" if should_upload else "")
     )
-    return {
-        "channel": channel.name,
-        "topics": topics,
-        "generated": generated,
-        "uploaded": uploaded,
+
+    run_entry = {
+        "timestamp":  datetime.datetime.now().isoformat(),
+        "channel":    channel.name,
+        "topics":     topics,
+        "generated":  generated,
+        "uploaded":   uploaded,
+        "elapsed_s":  elapsed,
     }
+    _append_run_log(channel, run_entry)
+
+    return run_entry
