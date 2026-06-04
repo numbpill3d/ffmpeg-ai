@@ -117,6 +117,21 @@ async def _upload(
 
 # ── Single video generation ───────────────────────────────────────────────────
 
+async def _fetch_channel_music(channel: ChannelConfig) -> Optional[Path]:
+    """Fetch background music for the channel's style. Returns None if unavailable."""
+    if not channel.music_style:
+        return None
+    try:
+        from ..auto.music import fetch_music
+        path = await fetch_music(style=channel.music_style)
+        if path:
+            console.print(f"[dim]  music: {path.name}[/]")
+        return path
+    except Exception as e:
+        console.print(f"[dim]  music unavailable: {e}[/]")
+        return None
+
+
 async def _generate_one(
     channel: ChannelConfig,
     topic: str,
@@ -125,11 +140,13 @@ async def _generate_one(
     model: str,
     quiet: bool,
     fresh: bool,
+    music_path: Optional[Path] = None,
 ) -> bool:
     """Generate one video. Returns True on success."""
     selected_voice = VOICES.get(channel.voice, channel.voice)
     duration = channel.shorts_duration if mode == "shorts" else channel.landscape_duration
     label = "short" if mode == "shorts" else "long-form"
+    brand = channel.brand_name or channel.display_name
     console.print(f"\n[bold cyan]── {label}: {topic} ──[/]")
     try:
         await run_pipeline(
@@ -143,6 +160,9 @@ async def _generate_one(
             quiet=quiet,
             thumbnail=True,
             fresh=fresh,
+            music_path=music_path,
+            brand_name=brand,
+            accent_color=channel.accent_color,
         )
         return True
     except Exception as e:
@@ -207,6 +227,9 @@ async def run_channel(
     out_dir.mkdir(parents=True, exist_ok=True)
     generated: list[dict] = []
 
+    # Fetch music once per channel run — shared across all topics
+    music_path: Optional[Path] = await _fetch_channel_music(channel)
+
     for topic in topics:
         ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
@@ -215,7 +238,8 @@ async def run_channel(
         if shorts:
             out = out_dir / f"{ts}_{slug}_short.mp4"
             ok  = await _generate_one(
-                channel, topic, "shorts", out, model, quiet, fresh=True,
+                channel, topic, "shorts", out, model, quiet,
+                fresh=True, music_path=music_path,
             )
             if ok:
                 url = await _upload(channel, topic, out) if (
@@ -227,12 +251,13 @@ async def run_channel(
                     "ts": ts,
                 })
 
-        # Landscape second — must be fresh so the pipeline generates the longer script
-        # rather than reusing the shorts-format script.json from the same topic slug.
+        # Landscape uses a fresh script to get the longer format,
+        # but reuses the same music track for consistency.
         if landscape:
             out_l = out_dir / f"{ts}_{slug}_landscape.mp4"
             ok    = await _generate_one(
-                channel, topic, "landscape", out_l, model, quiet, fresh=True,
+                channel, topic, "landscape", out_l, model, quiet,
+                fresh=True, music_path=music_path,
             )
             if ok:
                 url = await _upload(channel, topic, out_l) if (

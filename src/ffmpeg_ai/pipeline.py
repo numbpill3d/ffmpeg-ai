@@ -71,6 +71,8 @@ async def run_pipeline(
     caption_style: str = "karaoke",
     no_captions: bool = False,
     no_ambience: bool = False,
+    brand_name: str = "",
+    accent_color: str = "#00d4ff",
 ) -> Path:
     """
     images_dir:       use images from this directory instead of AI generation.
@@ -458,8 +460,23 @@ async def run_pipeline(
             thumb_note = ""
             if thumbnail:
                 thumb_path = output_path.with_suffix(".thumb.jpg")
-                extract_thumbnail(output_path, thumb_path)
-                thumb_note = "  +thumb"
+                try:
+                    from .video.thumbnail import make_thumbnail_from_job
+                    script_title = script.get("title", topic)
+                    designed = make_thumbnail_from_job(
+                        job_dir=job_dir,
+                        title=script_title,
+                        output_path=thumb_path,
+                        mode=mode,
+                        brand_name=brand_name,
+                        accent_color=accent_color,
+                    )
+                    thumb_note = "  +thumb(designed)" if designed else "  +thumb"
+                    if not designed:
+                        extract_thumbnail(output_path, thumb_path)
+                except Exception:
+                    extract_thumbnail(output_path, thumb_path)
+                    thumb_note = "  +thumb"
 
             tracker.complete("EXPORT", f"→ {output_path.name}{thumb_note}")
 

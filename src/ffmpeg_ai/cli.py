@@ -919,5 +919,98 @@ def channel_timer_install(
             info(f"systemctl --user enable --now ffmpeg-ai-{ch_name}.timer")
 
 
+# ── music subcommand group ────────────────────────────────────────────────────
+
+music_app = typer.Typer(
+    name="music",
+    help="Manage the royalty-free background music cache.",
+    rich_markup_mode="rich",
+    add_completion=False,
+)
+app.add_typer(music_app, name="music")
+
+
+@music_app.command("list")
+def music_list() -> None:
+    """[dim]Show all cached music tracks per style.[/]"""
+    from .auto.music import list_cached, _CACHE_DIR
+    cached = list_cached()
+    console.print()
+    if not cached:
+        info("no tracks cached yet — run: ffmpeg-ai music fetch <style>")
+        info(f"cache directory: {_CACHE_DIR}")
+        return
+    t = Table(box=box.SIMPLE, border_style=C_DIM, show_header=True, padding=(0, 2))
+    t.add_column("style",  style=f"bold {C_ACCENT}", no_wrap=True, min_width=14)
+    t.add_column("tracks", style=C_MUTED,            no_wrap=True, min_width=6)
+    t.add_column("files",  style="white")
+    for style, files in cached.items():
+        t.add_row(style, str(len(files)), ", ".join(files))
+    console.print(Panel(
+        t, title=f"[bold {C_ACCENT}]music cache[/]", border_style=C_DIM, box=box.ROUNDED,
+    ))
+    info(f"cache: {_CACHE_DIR}")
+
+
+@music_app.command("fetch")
+def music_fetch(
+    style: str = typer.Argument("ambient", help="Style to fetch: ambient/upbeat/dramatic/cinematic/documentary/educational"),  # noqa: E501
+    count: int = typer.Option(3, "--count", "-n", help="Minimum tracks to cache"),
+) -> None:
+    """[dim]Pre-fetch and cache royalty-free tracks for a music style.[/]"""
+    from .auto.music import _ensure_cached, _CCMIXTER_TAGS
+    valid = list(_CCMIXTER_TAGS)
+    if style not in valid:
+        error(f"unknown style '{style}' — choose from: {', '.join(valid)}")
+        raise typer.Exit(1)
+    info(f"fetching {style} tracks (min {count})…")
+    tracks = asyncio.run(_ensure_cached(style, min_tracks=count))
+    if tracks:
+        success(f"{len(tracks)} track(s) cached for style '{style}'")
+        for t in tracks:
+            console.print(f"  [dim]{t.name}[/]")
+    else:
+        warn("no tracks downloaded — check network or try again later")
+
+
+@music_app.command("add")
+def music_add(
+    url: str  = typer.Argument(..., help="YouTube / SoundCloud / direct audio URL"),
+    style: str = typer.Argument("ambient", help="Style to file it under"),
+) -> None:
+    """[dim]Download audio from a URL (via yt-dlp) and add it to the music cache.[/]
+
+    Use this to seed the library from the YouTube Audio Library or any
+    royalty-free source. Example:
+
+      ffmpeg-ai music add "https://www.youtube.com/watch?v=XXXX" ambient
+    """
+    from .auto.music import download_from_url, _CCMIXTER_TAGS
+    valid = list(_CCMIXTER_TAGS)
+    if style not in valid:
+        error(f"unknown style '{style}' — choose from: {', '.join(valid)}")
+        raise typer.Exit(1)
+    info(f"downloading → style: {style}  (via yt-dlp)…")
+    path = download_from_url(url, style)
+    if path:
+        success(f"cached: {path.name}  ({path.stat().st_size // 1024} KB)")
+    else:
+        error("download failed — check the URL or yt-dlp installation")
+        raise typer.Exit(1)
+
+
+@music_app.command("clear")
+def music_clear(
+    style: Optional[str] = typer.Argument(None, help="Style to clear (omit for all)"),
+) -> None:
+    """[dim]Delete cached music tracks.[/]"""
+    from .auto.music import clear_cache
+    n = clear_cache(style)
+    if n:
+        success(f"removed {n} track(s)" + (f" for style '{style}'" if style else ""))
+    else:
+        info("nothing to clear")
+
+
 if __name__ == "__main__":
     app()

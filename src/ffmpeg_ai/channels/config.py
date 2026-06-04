@@ -26,6 +26,9 @@ class ChannelConfig:
     privacy: str = "public"
     publish_hour: int = 12        # hour (0–23 local) to schedule uploads
     category_id: str = "28"
+    brand_name: str = ""          # shown on thumbnail bottom; defaults to display_name
+    music_style: Optional[str] = None   # ambient/upbeat/dramatic/cinematic/None
+    accent_color: str = "#00d4ff"       # hex color for thumbnail accent bar
     youtube_secrets: Optional[str] = None
     youtube_token: Optional[str] = None
 
@@ -130,6 +133,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 12,
         "category_id": "28",
+        "brand_name": "Tech Facts",
+        "music_style": "educational",
+        "accent_color": "#00d4ff",
         "youtube_secrets": None,
         "youtube_token": None,
     },
@@ -158,6 +164,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 10,
         "category_id": "27",
+        "brand_name": "History Uncovered",
+        "music_style": "documentary",
+        "accent_color": "#c8a96e",
         "youtube_secrets": None,
         "youtube_token": None,
     },
@@ -187,6 +196,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 14,
         "category_id": "28",
+        "brand_name": "Mind Blown",
+        "music_style": "cinematic",
+        "accent_color": "#7b68ee",
         "youtube_secrets": None,
         "youtube_token": None,
     },
@@ -213,6 +225,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 11,
         "category_id": "27",
+        "brand_name": "Myths & Legends",
+        "music_style": "cinematic",
+        "accent_color": "#ff6b35",
         "youtube_secrets": None,
         "youtube_token": None,
     },
@@ -239,6 +254,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 7,
         "category_id": "27",
+        "brand_name": "Stoic Mind",
+        "music_style": "ambient",
+        "accent_color": "#52b788",
         "youtube_secrets": None,
         "youtube_token": None,
     },
@@ -265,6 +283,9 @@ PRESETS: list[dict] = [
         "privacy": "public",
         "publish_hour": 9,
         "category_id": "27",
+        "brand_name": "Money Decoded",
+        "music_style": "upbeat",
+        "accent_color": "#00c853",
         "youtube_secrets": None,
         "youtube_token": None,
     },
