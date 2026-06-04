@@ -31,6 +31,10 @@ STYLE_VOICE_MAP: dict[str, str] = {
     "listicle":     "en-energetic",
     "documentary":  "en-documentary",
     "morris":       "en-documentary",
+    "curiosity":    "en-storyteller",
+    "mythology":    "en-storyteller",
+    "horror":       "en-documentary",
+    "finance":      "en-energetic",
 }
 
 

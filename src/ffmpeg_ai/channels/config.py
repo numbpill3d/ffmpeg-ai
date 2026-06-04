@@ -108,6 +108,135 @@ class ChannelConfig:
 # ── Built-in presets ──────────────────────────────────────────────────────────
 
 PRESETS: list[dict] = [
+    # ── The three primary channels ────────────────────────────────────────────
+    {
+        "name": "disclosure",
+        "display_name": "The Disclosure Files",
+        "niche": (
+            "UAP and UFO phenomena, government disclosure, non-human intelligence (NHI), "
+            "transdimensional entities, classified programs, whistleblower testimonies, "
+            "ancient astronaut theory, Skinwalker Ranch, AARO reports, interdimensional beings, "
+            "reptilian hypothesis, deep state secrecy, declassified documents"
+        ),
+        "audience": (
+            "UFO enthusiasts, disclosure advocates, conspiracy researchers, "
+            "paranormal investigators, open-minded skeptics"
+        ),
+        "style": "dramatic",
+        "voice": "en-documentary",
+        "sources": [
+            "reddit:UFOs",
+            "reddit:NHI",
+            "reddit:HighStrangeness",
+            "reddit:conspiracy",
+            "reddit:aliens",
+            "reddit:UFOB",
+            "reddit:Paranormal",
+            "wiki:category:Unidentified flying objects",
+            "wiki:category:Extraterrestrial life",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 55,
+        "landscape_duration": 480,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 20,
+        "category_id": "27",
+        "brand_name": "Disclosure Files",
+        "music_style": "dramatic",
+        "accent_color": "#8b00ff",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    {
+        "name": "zerocell",
+        "display_name": "Zero Cell",
+        "niche": (
+            "hacking, cybersecurity, reverse engineering, malware analysis, "
+            "exploit development, CVEs, red teaming, CTF write-ups, "
+            "offensive security, bug bounty, APT groups, OSINT, "
+            "binary exploitation, social engineering, threat intelligence"
+        ),
+        "audience": (
+            "security researchers, ethical hackers, CTF players, "
+            "malware analysts, penetration testers, infosec professionals"
+        ),
+        "style": "educational",
+        "voice": "en-male",
+        "sources": [
+            "reddit:netsec",
+            "reddit:ReverseEngineering",
+            "reddit:hacking",
+            "reddit:cybersecurity",
+            "reddit:Malware",
+            "reddit:bugbounty",
+            "hn:security vulnerability",
+            "hn:reverse engineering",
+            "hn:exploit",
+            "rss:https://krebsonsecurity.com/feed/",
+            "rss:https://www.schneier.com/blog/atom.xml",
+            "rss:https://isc.sans.edu/rssfeed_full.xml",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 50,
+        "landscape_duration": 420,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 13,
+        "category_id": "28",
+        "brand_name": "Zero Cell",
+        "music_style": "ambient",
+        "accent_color": "#00ff41",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    {
+        "name": "labdrop",
+        "display_name": "Lab Drop",
+        "niche": (
+            "brand new peer-reviewed scientific discoveries, freshly published studies, "
+            "breakthroughs in biology, physics, medicine, neuroscience, materials science, "
+            "archaeology, climate science, and space — explained in plain everyday language "
+            "with zero jargon; always the most recently published research"
+        ),
+        "audience": (
+            "curious non-scientists, lifelong learners, students, "
+            "people who love science but have no formal background"
+        ),
+        "style": "curiosity",
+        "voice": "en-female",
+        "sources": [
+            "reddit:science",
+            "reddit:EverythingScience",
+            "reddit:biology",
+            "reddit:physics",
+            "reddit:medicine",
+            "reddit:neuroscience",
+            "reddit:space",
+            "hn:new study",
+            "hn:research published",
+            "rss:https://www.sciencedaily.com/rss/all.xml",
+            "rss:https://www.newscientist.com/feed/home/",
+            "rss:https://phys.org/rss-feed/",
+            "rss:https://www.nih.gov/rss/news.xml",
+        ],
+        "shorts_per_day": 1,
+        "landscape_per_week": 1,
+        "shorts_duration": 45,
+        "landscape_duration": 360,
+        "upload": False,
+        "privacy": "public",
+        "publish_hour": 11,
+        "category_id": "28",
+        "brand_name": "Lab Drop",
+        "music_style": "upbeat",
+        "accent_color": "#00cfff",
+        "youtube_secrets": None,
+        "youtube_token": None,
+    },
+    # ── Legacy presets (kept, not default-run) ────────────────────────────────
     {
         "name": "tech",
         "display_name": "Tech Facts Daily",
