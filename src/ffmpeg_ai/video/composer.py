@@ -25,7 +25,10 @@ def _get_work_dims(spec: VideoSpec) -> tuple[int, int]:
 def _run(cmd: list[str], label: str = "ffmpeg"):
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"{label} failed:\n{result.stderr}")
+        # Include both stderr and stdout — ffmpeg writes errors to stderr,
+        # but some filter errors only appear in stdout.
+        detail = (result.stderr or result.stdout or "(no output)").strip()
+        raise RuntimeError(f"{label} failed:\n{detail}")
     return result
 
 
@@ -38,11 +41,17 @@ def get_audio_duration(audio_path: Path) -> float:
         str(audio_path),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
+    raw = result.stdout.strip()
+    if not raw:
+        raise RuntimeError(
+            f"ffprobe returned no output for {audio_path.name}"
+            + (f": {result.stderr.strip()}" if result.stderr.strip() else "")
+        )
     try:
-        return float(result.stdout.strip())
+        return float(raw)
     except ValueError:
         raise RuntimeError(
-            f"ffprobe could not read duration from {audio_path}: {result.stderr.strip()}"
+            f"ffprobe returned non-numeric duration for {audio_path.name}: {raw!r}"
         )
 
 

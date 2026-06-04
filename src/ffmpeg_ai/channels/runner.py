@@ -11,6 +11,7 @@ from typing import Optional
 from ..ai.openrouter import FREE_MODELS
 from ..ai.tts import VOICES
 from ..auto.harvest import harvest_for_channel, save_seen
+from ..auto.music import fetch_music
 from ..auto.youtube import next_publish_time, upload_video
 from ..pipeline import run_pipeline
 from ..ui.display import console
@@ -122,7 +123,6 @@ async def _fetch_channel_music(channel: ChannelConfig) -> Optional[Path]:
     if not channel.music_style:
         return None
     try:
-        from ..auto.music import fetch_music
         path = await fetch_music(style=channel.music_style)
         if path:
             console.print(f"[dim]  music: {path.name}[/]")
@@ -227,12 +227,15 @@ async def run_channel(
     out_dir.mkdir(parents=True, exist_ok=True)
     generated: list[dict] = []
 
-    # Fetch music once per channel run — shared across all topics
-    music_path: Optional[Path] = await _fetch_channel_music(channel)
+    # Fetch music once per channel run — shared across all topics this run
+    _music_path: Optional[Path] = await _fetch_channel_music(channel)
 
     for topic in topics:
         ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
+
+        # Re-validate music path each iteration — file could be cleared between topics
+        music_path = _music_path if (_music_path and _music_path.exists()) else None
 
         # Short first — uses a fresh script (new generation each run)
         if shorts:

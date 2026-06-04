@@ -862,9 +862,14 @@ def channel_timer_install(
         info("no channels configured — run: ffmpeg-ai channel init-presets")
         return
 
+    import ffmpeg_ai as _pkg
     ffmpeg_ai_bin = shutil.which("ffmpeg-ai") or "ffmpeg-ai"
-    env_file      = Path.home() / "Projects" / "Software" / "ffmpeg-ai" / ".env"
-    systemd_dir   = Path.home() / ".config" / "systemd" / "user"
+    # Locate .env relative to the installed package source, fall back to config dir
+    _pkg_root = Path(_pkg.__file__).parent.parent.parent
+    env_file  = _pkg_root / ".env" if (_pkg_root / ".env").exists() else (
+        Path.home() / ".config" / "ffmpeg-ai" / ".env"
+    )
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
 
     console.print()
     if not dry_run:

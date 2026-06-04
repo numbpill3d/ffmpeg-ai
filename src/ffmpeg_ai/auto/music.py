@@ -152,8 +152,9 @@ async def _download(url: str, dest: Path, client: httpx.AsyncClient) -> bool:
         async with client.stream("GET", url, headers=_HEADERS, timeout=60) as r:
             if r.status_code != 200:
                 return False
-            ct = r.headers.get("content-type", "")
-            if "audio" not in ct and "octet" not in ct and "mpeg" not in ct:
+            ct = r.headers.get("content-type", "").split(";")[0].strip().lower()
+            if not (ct.startswith("audio/") or ct == "application/octet-stream"
+                    or "mpeg" in ct):
                 return False
             dest.parent.mkdir(parents=True, exist_ok=True)
             with dest.open("wb") as f:

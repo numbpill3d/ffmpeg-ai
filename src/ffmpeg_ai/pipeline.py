@@ -21,7 +21,7 @@ from rich import box
 from .ui.display import console
 from .ui.widgets import PipelineTracker, stats_table
 from .ai.openrouter import generate_script, FREE_MODELS
-from .ai.images import generate_images, load_user_images
+from .ai.images import generate_images, load_user_images, _ALL_PROVIDERS as _IMG_PROVIDERS
 from .ai.tts import synthesize, DEFAULT_VOICE, rate_for_mode
 from .video.composer import (
     image_to_video, concat_with_transitions, concat_audio,
@@ -108,13 +108,21 @@ async def run_pipeline(
         # ── 1. Script ────────────────────────────────────────────────────────
         script_cache = job_dir / "script.json"
 
+        script = None
         if script_path is not None:
-            script = json.loads(Path(script_path).read_text())
+            try:
+                script = json.loads(Path(script_path).read_text())
+            except (json.JSONDecodeError, OSError) as e:
+                raise RuntimeError(f"could not load script from {script_path}: {e}") from e
             tracker.complete("SCRIPT", "loaded from file", cached=True)
         elif not fresh and script_cache.exists():
-            script = json.loads(script_cache.read_text())
-            tracker.complete("SCRIPT", "loaded from cache", cached=True)
-        else:
+            try:
+                script = json.loads(script_cache.read_text())
+                tracker.complete("SCRIPT", "loaded from cache", cached=True)
+            except (json.JSONDecodeError, OSError):
+                script_cache.unlink(missing_ok=True)  # corrupt — regenerate below
+
+        if script is None:
             model_short = model.split("/")[-1]
             tracker.start("SCRIPT", f"model: {model_short}")
             script = await generate_script(
@@ -189,9 +197,7 @@ async def run_pipeline(
                 tracker.complete(s, "skipped (dry run)")
             return output_path
 
-        providers = image_providers or [
-            "bfl", "fal", "prodia", "pollinations", "huggingface", "stable_horde", "together",
-        ]
+        providers = image_providers or _IMG_PROVIDERS
 
         # ── 2+3. TTS + Images (Semantic Sync) ────────────────────────────────
         tts_dir = job_dir / "tts"
@@ -339,7 +345,7 @@ async def run_pipeline(
 
         # 3. Limit to spec.max_duration
         if total_dur > spec.max_duration:
-            total_dur = spec.max_duration
+            total_dur = spec.max_duration  # actual video duration after clamping
             current_v_sum = 0.0
             new_durations = []
             for d in clip_durations:
@@ -471,9 +477,11 @@ async def run_pipeline(
                         brand_name=brand_name,
                         accent_color=accent_color,
                     )
-                    thumb_note = "  +thumb(designed)" if designed else "  +thumb"
-                    if not designed:
+                    if designed is not None:
+                        thumb_note = "  +thumb(designed)"
+                    else:
                         extract_thumbnail(output_path, thumb_path)
+                        thumb_note = "  +thumb"
                 except Exception:
                     extract_thumbnail(output_path, thumb_path)
                     thumb_note = "  +thumb"

@@ -95,6 +95,8 @@ def audio_to_ass(
                     words.append((w.start, w.end, text))
 
     if not words:
+        # Whisper returned no word-level timestamps — fall back to segment SRT.
+        # This produces plain subtitles instead of karaoke; user will see ".srt" in output.
         srt_path = output_path.with_suffix(".srt")
         _segs_to_srt(seg_list, srt_path)
         return srt_path
