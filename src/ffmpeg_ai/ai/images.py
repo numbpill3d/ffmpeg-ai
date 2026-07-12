@@ -16,22 +16,19 @@ import httpx
 # Lazily initialised per event loop — batch mode calls asyncio.run() multiple
 # times, each creating a new loop; a module-level Lock would be bound to the
 # first loop and raise RuntimeError for all subsequent topics.
-_POLLINATIONS_LOCK: asyncio.Lock | None = None
-
 
 def _get_pollinations_lock() -> asyncio.Lock:
-    global _POLLINATIONS_LOCK
-    if _POLLINATIONS_LOCK is None:
-        _POLLINATIONS_LOCK = asyncio.Lock()
-        return _POLLINATIONS_LOCK
-    lock_loop = getattr(_POLLINATIONS_LOCK, "_loop", None)
-    if lock_loop is not None:
-        try:
-            if lock_loop is not asyncio.get_running_loop():
-                _POLLINATIONS_LOCK = asyncio.Lock()
-        except RuntimeError:
-            _POLLINATIONS_LOCK = asyncio.Lock()
-    return _POLLINATIONS_LOCK
+    """Get or create a lock bound to the current event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    # Locks are bound to their creating loop; we need a fresh one per loop
+    lock_attr = f"_pollinations_lock_{id(loop) if loop else 'none'}"
+    if not hasattr(_get_pollinations_lock, lock_attr):
+        setattr(_get_pollinations_lock, lock_attr, asyncio.Lock())
+    return getattr(_get_pollinations_lock, lock_attr)
 
 # Cinematic style suffixes — portrait (9:16) and landscape (16:9) variants
 _CINEMATIC_PORTRAIT = [
@@ -509,6 +506,7 @@ async def generate_image(
     providers: list[str] | None = None,
     width: int = IMG_WIDTH,
     height: int = IMG_HEIGHT,
+    on_attempt: Optional[Callable[[str, bool], None]] = None,
 ) -> tuple[Path, bool]:
     """Generate one image, trying providers in order, placeholder as last resort.
 
@@ -535,7 +533,11 @@ async def generate_image(
         elif provider == "together":
             result = await _try_together(enriched, output_path, seed, width, height)
         if result is not None:
+            if on_attempt is not None:
+                on_attempt(provider, True)
             return result, False
+        if on_attempt is not None:
+            on_attempt(provider, False)
 
     # Last-chance retry: stripped prompt + downscaled dims via pollinations.
     # The main loop already tried full-size; large dims (1920x1080) trigger rate limits.
@@ -546,7 +548,11 @@ async def generate_image(
         rh = max(64, round(height / scale_denom / 32) * 32)
         result = await _try_pollinations(bare, output_path, seed + 9973 + scale_denom, rw, rh)
         if result is not None:
+            if on_attempt is not None:
+                on_attempt(f"pollinations:retry-{scale_denom}", True)
             return result, False
+        if on_attempt is not None:
+            on_attempt(f"pollinations:retry-{scale_denom}", False)
 
     return _make_placeholder(prompt, output_path, width, height), True
 
@@ -557,6 +563,7 @@ async def generate_images(
     providers: list[str] | None = None,
     max_concurrent: int = 4,
     on_image_done: Optional[Callable[[int, bool], None]] = None,
+    on_attempt: Optional[Callable[[int, str, bool], None]] = None,
     width: int = IMG_WIDTH,
     height: int = IMG_HEIGHT,
 ) -> tuple[list[Path], int]:
@@ -568,10 +575,15 @@ async def generate_images(
     sem = asyncio.Semaphore(max_concurrent)
 
     async def _gen(i: int, prompt: str) -> tuple[Path, bool]:
+        def _attempt(provider: str, ok: bool) -> None:
+            if on_attempt is not None:
+                on_attempt(i, provider, ok)
+
         async with sem:
             path, is_placeholder = await generate_image(
                 prompt, out_dir / f"frame_{i:03d}.jpg",
                 seed=i * 7, providers=providers, width=width, height=height,
+                on_attempt=_attempt if on_attempt is not None else None,
             )
             if on_image_done is not None:
                 on_image_done(i, is_placeholder)

@@ -2,6 +2,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +26,7 @@ from .ai.openrouter import generate_script, FREE_MODELS
 from .ai.images import generate_images, load_user_images, _ALL_PROVIDERS as _IMG_PROVIDERS
 from .ai.tts import synthesize, DEFAULT_VOICE, rate_for_mode
 from .video.composer import (
-    image_to_video, concat_with_transitions, concat_audio,
+    image_to_video, concat_with_transitions, concat_plain, concat_audio,
     merge_audio, mix_music, burn_captions, encode_video, get_audio_duration,
     detect_beats, snap_to_beats, extract_thumbnail, add_hook_overlay, add_ambience,
     get_color_grade, MOTION_STYLES,
@@ -33,6 +35,20 @@ from .video.shorts import MODES
 from .video.captions import audio_to_ass
 
 _JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
+_RENDER_MODES = {"kenburns", "storyboard", "fast-preview"}
+
+
+@dataclass(slots=True)
+class RenderPlan:
+    images: list[Path]
+    clip_durations: list[float]
+    transition_duration: float
+    total_duration: float
+    render_mode: str
+
+    @property
+    def clip_count(self) -> int:
+        return len(self.images)
 
 
 def _slug(topic: str) -> str:
@@ -46,8 +62,221 @@ def _find_font() -> str:
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/DejaVuSans-Bold.ttf",
+        # Additional common font locations
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/TTF/LiberationSans-Bold.ttf",
     ]
     return next((f for f in candidates if Path(f).exists()), "")
+
+
+def _check_ffmpeg() -> None:
+    """Verify ffmpeg and ffprobe are available on PATH."""
+    for tool in ["ffmpeg", "ffprobe"]:
+        if shutil.which(tool) is None:
+            raise RuntimeError(
+                f"'{tool}' not found in PATH — install ffmpeg to use this tool"
+            )
+
+
+def _init_run_report(
+    *,
+    topic: str,
+    output_path: Path,
+    job_dir: Path,
+    mode: str,
+    duration: int,
+    model: str,
+    voice: str,
+    style: Optional[str],
+    caption_style: str,
+    thumbnail: bool,
+    music_path: Optional[Path],
+    images_dir: Optional[Path],
+    use_ai_images: bool,
+    image_providers: list[str],
+    fresh: bool,
+    dry_run: bool,
+    no_captions: bool,
+    no_ambience: bool,
+    brand_name: str,
+    accent_color: str,
+    render_mode: str = "kenburns",
+) -> dict:
+    if images_dir is not None:
+        image_strategy = {"source": "user", "path": str(images_dir)}
+    elif use_ai_images:
+        image_strategy = {"source": "ai", "providers": image_providers}
+    else:
+        image_strategy = {"source": "placeholder", "providers": []}
+
+    return {
+        "topic": topic,
+        "job_dir": str(job_dir),
+        "output_path": str(output_path),
+        "mode": mode,
+        "duration_target_s": duration,
+        "model_requested": model,
+        "voice": voice,
+        "style": style or "default",
+        "caption_style": caption_style,
+        "render_mode": render_mode,
+        "thumbnail": {
+            "enabled": thumbnail,
+            "brand_name": brand_name,
+            "accent_color": accent_color,
+        },
+        "music": {
+            "enabled": music_path is not None,
+            "path": str(music_path) if music_path is not None else None,
+        },
+        "image_strategy": image_strategy,
+        "fresh": fresh,
+        "dry_run": dry_run,
+        "no_captions": no_captions,
+        "no_ambience": no_ambience,
+        "status": "running",
+    }
+
+
+def _finalize_run_report(
+    report: dict,
+    job_dir: Path,
+    *,
+    status: str,
+    elapsed_s: float,
+    extra: Optional[dict] = None,
+) -> Path:
+    report["status"] = status
+    report["elapsed_s"] = round(elapsed_s, 2)
+    if extra:
+        report.update(extra)
+    path = job_dir / "run_report.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _adapt_script(script: dict, *, topic: str) -> dict:
+    def _fix_vp(obj: dict, fallback: str) -> None:
+        vp = obj.get("visual_prompts")
+        if not isinstance(vp, list) or len(vp) == 0:
+            obj["visual_prompts"] = [vp] if isinstance(vp, str) else [fallback]
+
+    if "hook" in script and isinstance(script["hook"], str):
+        script["hook"] = {"text": script["hook"], "visual_prompts": [topic]}
+    elif isinstance(script.get("hook"), dict):
+        _fix_vp(script["hook"], topic)
+
+    if "cta" in script and isinstance(script["cta"], str):
+        script["cta"] = {"text": script["cta"], "visual_prompts": [topic]}
+    elif isinstance(script.get("cta"), dict):
+        _fix_vp(script["cta"], topic)
+
+    for seg in script.get("segments", []):
+        _fix_vp(seg, topic)
+    return script
+
+
+def _expand_timeline_for_pacing(
+    *,
+    prompts: list[str],
+    part_mapping: list[tuple[float, int]],
+    max_clip_duration: float,
+) -> tuple[list[str], list[tuple[float, int]]]:
+    """Repeat visual prompts so no narration part holds one visual too long.
+
+    `part_mapping` describes the narration duration and original prompt count for
+    each hook/segment/CTA part. When a part would leave a visual on screen longer
+    than `max_clip_duration`, cycle that part's prompts until the part has enough
+    visual beats. User-supplied image directories already cycle when asked for
+    more images; AI providers receive repeated prompts with different frame
+    indices/seeds.
+    """
+    if max_clip_duration <= 0:
+        return prompts, part_mapping
+
+    expanded: list[str] = []
+    expanded_mapping: list[tuple[float, int]] = []
+    cursor = 0
+
+    for part_dur, prompt_count in part_mapping:
+        part_prompts = prompts[cursor:cursor + prompt_count]
+        cursor += prompt_count
+        if prompt_count <= 0 or not part_prompts:
+            expanded_mapping.append((part_dur, 0))
+            continue
+
+        target_count = max(prompt_count, math.ceil(part_dur / max_clip_duration))
+        for i in range(target_count):
+            expanded.append(part_prompts[i % len(part_prompts)])
+        expanded_mapping.append((part_dur, target_count))
+
+    return expanded, expanded_mapping
+
+
+def _default_render_mode(mode: str) -> str:
+    return "storyboard" if mode == "landscape" else "kenburns"
+
+
+def _validate_render_mode(render_mode: str | None, mode: str) -> str:
+    selected = render_mode or _default_render_mode(mode)
+    if selected not in _RENDER_MODES:
+        raise ValueError(
+            f"unknown render_mode {selected!r} — choose from: {', '.join(sorted(_RENDER_MODES))}"
+        )
+    return selected
+
+
+def _raw_clip_durations(part_mapping: list[tuple[float, int]]) -> list[float]:
+    durations: list[float] = []
+    for part_dur, n_imgs in part_mapping:
+        if n_imgs:
+            durations.extend([part_dur / n_imgs] * n_imgs)
+    return durations
+
+
+def _plan_render(
+    *,
+    images: list[Path],
+    part_mapping: list[tuple[float, int]],
+    total_dur: float,
+    max_duration: float,
+    render_mode: str,
+) -> RenderPlan:
+    raw = _raw_clip_durations(part_mapping)
+    n_clips = len(images)
+    if n_clips == 0:
+        raise RuntimeError("no images were generated — cannot produce video")
+    if len(raw) != n_clips:
+        raise RuntimeError(
+            f"timeline/image mismatch: {len(raw)} durations for {n_clips} images"
+        )
+
+    trans_d = 0.0
+    if render_mode == "kenburns" and n_clips > 1:
+        trans_d = min(0.4, min(raw) * 0.25)
+    total_overlap = (n_clips - 1) * trans_d
+    extra_per_clip = total_overlap / n_clips if n_clips else 0
+    clip_durations = [d + extra_per_clip for d in raw]
+
+    planned_total = min(total_dur, max_duration)
+    if total_dur > max_duration:
+        current_v_sum = 0.0
+        kept: list[float] = []
+        for d in clip_durations:
+            if current_v_sum + d > max_duration + total_overlap:
+                break
+            kept.append(d)
+            current_v_sum += d
+        clip_durations = kept
+        images = images[:len(clip_durations)]
+
+    return RenderPlan(
+        images=list(images),
+        clip_durations=clip_durations,
+        transition_duration=trans_d,
+        total_duration=planned_total,
+        render_mode=render_mode,
+    )
 
 
 async def run_pipeline(
@@ -72,7 +301,8 @@ async def run_pipeline(
     no_captions: bool = False,
     no_ambience: bool = False,
     brand_name: str = "",
-    accent_color: str = "#00d4ff",
+    accent_color: str = "#c084ff",
+    render_mode: Optional[str] = None,
 ) -> Path:
     """
     images_dir:       use images from this directory instead of AI generation.
@@ -88,429 +318,555 @@ async def run_pipeline(
     caption_style:    karaoke, plain, or bold-center.
     no_captions:      skip transcription and caption burn entirely.
     """
+    _check_ffmpeg()
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r} — choose from: {', '.join(MODES)}")
+    render_mode = _validate_render_mode(render_mode, mode)
     spec = MODES[mode]
     start_time = time.time()
+    providers = image_providers or _IMG_PROVIDERS
 
     job_dir = _JOB_CACHE / _slug(topic)
     if fresh:
         shutil.rmtree(job_dir, ignore_errors=True)
     job_dir.mkdir(parents=True, exist_ok=True)
 
+    report = _init_run_report(
+        topic=topic,
+        output_path=output_path,
+        job_dir=job_dir,
+        mode=mode,
+        duration=duration,
+        model=model,
+        voice=voice,
+        style=style,
+        caption_style=caption_style,
+        render_mode=render_mode,
+        thumbnail=thumbnail,
+        music_path=music_path,
+        images_dir=images_dir,
+        use_ai_images=use_ai_images,
+        image_providers=providers,
+        fresh=fresh,
+        dry_run=dry_run,
+        no_captions=no_captions,
+        no_ambience=no_ambience,
+        brand_name=brand_name,
+        accent_color=accent_color,
+    )
+    report["cache_hits"] = {"script": False, "tts": False, "images": False}
+    report["artifacts"] = {}
+    report["script"] = {"source": None, "title": None, "segment_count": 0}
+    report["captions"] = {"enabled": not no_captions, "status": "pending"}
+    report["thumbnail_result"] = {"enabled": thumbnail, "status": "pending"}
+    report["placeholder_count"] = 0
+    report["failed_stage"] = None
+    current_stage: Optional[str] = None
+
     stages = ["SCRIPT", "TTS", "IMAGES", "VIDEO", "CAPTIONS", "AMBIENCE"]
     if music_path and music_path.is_file():
         stages.append("MUSIC")
     stages.append("EXPORT")
 
-    with PipelineTracker(stages, quiet=quiet) as tracker:
+    try:
+        with PipelineTracker(stages, quiet=quiet) as tracker:
+            current_stage = "SCRIPT"
+            script_cache = job_dir / "script.json"
 
-        # ── 1. Script ────────────────────────────────────────────────────────
-        script_cache = job_dir / "script.json"
+            script = None
+            if script_path is not None:
+                try:
+                    script = json.loads(Path(script_path).read_text())
+                except (json.JSONDecodeError, OSError) as e:
+                    raise RuntimeError(f"could not load script from {script_path}: {e}") from e
+                report["script"]["source"] = "file"
+                report["artifacts"]["script_path"] = str(Path(script_path))
+                tracker.complete("SCRIPT", "loaded from file", cached=True)
+            elif not fresh and script_cache.exists():
+                try:
+                    script = json.loads(script_cache.read_text())
+                    report["cache_hits"]["script"] = True
+                    report["script"]["source"] = "cache"
+                    report["artifacts"]["script_path"] = str(script_cache)
+                    tracker.complete("SCRIPT", "loaded from cache", cached=True)
+                except (json.JSONDecodeError, OSError):
+                    script_cache.unlink(missing_ok=True)
 
-        script = None
-        if script_path is not None:
-            try:
-                script = json.loads(Path(script_path).read_text())
-            except (json.JSONDecodeError, OSError) as e:
-                raise RuntimeError(f"could not load script from {script_path}: {e}") from e
-            tracker.complete("SCRIPT", "loaded from file", cached=True)
-        elif not fresh and script_cache.exists():
-            try:
-                script = json.loads(script_cache.read_text())
-                tracker.complete("SCRIPT", "loaded from cache", cached=True)
-            except (json.JSONDecodeError, OSError):
-                script_cache.unlink(missing_ok=True)  # corrupt — regenerate below
-
-        if script is None:
-            model_short = model.split("/")[-1]
-            tracker.start("SCRIPT", f"model: {model_short}")
-            script = await generate_script(
-                topic, duration=duration, model=model,
-                style=style, mode=mode,
-            )
-            script_cache.write_text(json.dumps(script, indent=2))
-            tracker.complete("SCRIPT", "generated new script")
-
-        def _adapt_script(s: dict) -> dict:
-            def _fix_vp(obj: dict, fallback: str) -> None:
-                vp = obj.get("visual_prompts")
-                if not isinstance(vp, list) or len(vp) == 0:
-                    obj["visual_prompts"] = [vp] if isinstance(vp, str) else [fallback]
-
-            if "hook" in s and isinstance(s["hook"], str):
-                s["hook"] = {"text": s["hook"], "visual_prompts": [topic]}
-            elif isinstance(s.get("hook"), dict):
-                _fix_vp(s["hook"], topic)
-
-            if "cta" in s and isinstance(s["cta"], str):
-                s["cta"] = {"text": s["cta"], "visual_prompts": [topic]}
-            elif isinstance(s.get("cta"), dict):
-                _fix_vp(s["cta"], topic)
-
-            for seg in s.get("segments", []):
-                _fix_vp(seg, topic)
-            return s
-
-        script = _adapt_script(script)
-        hook = script["hook"]
-        segments = script["segments"]
-        cta = script["cta"]
-        viral = script.get("viral_package", {})
-
-        # Save metadata package
-        (job_dir / "metadata.json").write_text(json.dumps(viral, indent=2))
-
-        tracker.print(Panel(
-            stats_table({
-                "title":    script.get("title", ""),
-                "hook":     hook["text"][:80],
-                "segments": str(len(segments)),
-            }),
-            title="[cyan]script[/]", border_style="bright_black", box=box.ROUNDED,
-        ))
-
-        if edit_script:
-            edit_file = job_dir / "script_edit.json"
-            edit_file.write_text(json.dumps(script, indent=2))
-            if tracker._live:
-                tracker._live.stop()
-            editor = os.environ.get("EDITOR", "nano")
-            try:
-                subprocess.run([*shlex.split(editor), str(edit_file)])
-            except FileNotFoundError:
-                raise RuntimeError(
-                    f"editor not found: {editor!r} — set $EDITOR to an installed editor"
+            if script is None:
+                model_short = model.split("/")[-1]
+                tracker.start("SCRIPT", f"model: {model_short}")
+                script = await generate_script(
+                    topic,
+                    duration=duration,
+                    model=model,
+                    style=style,
+                    mode=mode,
                 )
-            script = _adapt_script(json.loads(edit_file.read_text()))
-            script_cache.write_text(json.dumps(script, indent=2))
-            # Re-bind locals so TTS uses the edited script
+                script_cache.write_text(json.dumps(script, indent=2))
+                report["script"]["source"] = "generated"
+                report["artifacts"]["script_path"] = str(script_cache)
+                tracker.complete("SCRIPT", "generated new script")
+
+            script = _adapt_script(script, topic=topic)
             hook = script["hook"]
             segments = script["segments"]
             cta = script["cta"]
-            if tracker._live:
-                tracker._live.start()
+            viral = script.get("viral_package", {})
+            report["script"]["title"] = script.get("title", "")
+            report["script"]["segment_count"] = len(segments)
 
-        if dry_run:
-            skip = [s for s in stages if s != "SCRIPT"]
-            for s in skip:
-                tracker.complete(s, "skipped (dry run)")
-            return output_path
+            metadata_path = job_dir / "metadata.json"
+            metadata_path.write_text(json.dumps(viral, indent=2))
+            report["artifacts"]["metadata_path"] = str(metadata_path)
 
-        providers = image_providers or _IMG_PROVIDERS
+            tracker.print(Panel(
+                stats_table({
+                    "title": script.get("title", ""),
+                    "hook": hook["text"][:80],
+                    "segments": str(len(segments)),
+                }),
+                title="[cyan]script[/]",
+                border_style="bright_black",
+                box=box.ROUNDED,
+            ))
 
-        # ── 2+3. TTS + Images (Semantic Sync) ────────────────────────────────
-        tts_dir = job_dir / "tts"
-        img_dir = job_dir / "images"
-        combined_audio = job_dir / "narration.mp3"
-
-        tts_dir.mkdir(parents=True, exist_ok=True)
-        img_dir.mkdir(parents=True, exist_ok=True)
-
-        tts_rate = rate_for_mode(mode)
-        tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
-
-        async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
-            hook_audio = tts_dir / "hook.mp3"
-            cta_audio = tts_dir / "cta.mp3"
-            seg_paths = [tts_dir / f"seg_{i:03d}.mp3" for i in range(len(segments))]
-
-            # TTS caching: skip synthesis when script+voice+rate hash matches
-            all_texts = [hook["text"], cta["text"]] + [s["text"] for s in segments]
-            tts_hash = hashlib.sha256(
-                (voice + tts_rate + "".join(all_texts)).encode()
-            ).hexdigest()[:16]
-            hash_file = tts_dir / "hash.txt"
-            all_segs = [hook_audio] + seg_paths + [cta_audio]
-            tts_cached = (
-                not fresh
-                and hash_file.exists()
-                and hash_file.read_text().strip() == tts_hash
-                and all(p.exists() for p in all_segs)
-            )
-
-            if not tts_cached:
-                await asyncio.gather(
-                    synthesize(hook["text"], hook_audio, voice=voice, rate=tts_rate),
-                    synthesize(cta["text"], cta_audio, voice=voice, rate=tts_rate),
-                    *[
-                        synthesize(seg["text"], seg_paths[i], voice=voice, rate=tts_rate)
-                        for i, seg in enumerate(segments)
-                    ],
-                )
-                hash_file.write_text(tts_hash)
-
-            seg_audios = seg_paths
-
-            all_a = [hook_audio] + seg_audios + [cta_audio]
-            await asyncio.to_thread(concat_audio, all_a, combined_audio)
-
-            # Probe all durations in parallel
-            durs = await asyncio.gather(*[asyncio.to_thread(get_audio_duration, a) for a in all_a])
-            h_dur, *mid, c_dur = durs
-            seg_durs = mid
-
-            timeline_prompts = []
-            part_mapping = []
-
-            timeline_prompts.extend(hook["visual_prompts"])
-            part_mapping.append((h_dur, len(hook["visual_prompts"])))
-
-            for i, seg in enumerate(segments):
-                timeline_prompts.extend(seg["visual_prompts"])
-                part_mapping.append((seg_durs[i], len(seg["visual_prompts"])))
-
-            timeline_prompts.extend(cta["visual_prompts"])
-            part_mapping.append((c_dur, len(cta["visual_prompts"])))
-
-            total_dur = sum(d for d, _ in part_mapping)
-            cache_note = "  (cached)" if tts_cached else ""
-            tracker.complete("TTS", f"{total_dur:.1f}s{cache_note}")
-            return combined_audio, total_dur, timeline_prompts, part_mapping
-
-        # We must do TTS first to get durations, then Images
-        combined_audio, total_dur, image_prompts, part_mapping = await _do_tts_and_sync()
-
-        n_total_images = len(image_prompts)
-        tracker.start("IMAGES", f"{n_total_images} frames (synced)")
-        tracker.set_image_count(n_total_images)
-
-        async def _do_images() -> tuple[list[Path], int]:
-            if images_dir is not None:
-                src = load_user_images(images_dir, n_total_images)
-                imgs: list[Path] = []
-                for i, s in enumerate(src):
-                    dst = img_dir / f"frame_{i:03d}{s.suffix.lower()}"
-                    shutil.copy2(s, dst)
-                    imgs.append(dst)
-                    tracker.image_done(i, False)
-                tracker.complete("IMAGES", f"{len(imgs)} user images")
-                return imgs, 0
-
-            # Always regenerate if counts don't match exactly
-            cached_frames = sorted(img_dir.glob("frame_*.jpg")) if img_dir.is_dir() else []
-            if not fresh and len(cached_frames) == n_total_images:
-                imgs = cached_frames
-                for i in range(len(imgs)):
-                    tracker.image_done(i, False)
-                tracker.complete("IMAGES", f"{n_total_images} cached", cached=True)
-                return imgs, 0
-
-            if not use_ai_images:
-                from .ai.images import _make_placeholder
-                imgs = [
-                    _make_placeholder(p, img_dir / f"frame_{i:03d}.jpg", spec.width, spec.height)
-                    for i, p in enumerate(image_prompts)
-                ]
-                for i in range(len(imgs)):
-                    tracker.image_done(i, True)
-                tracker.complete("IMAGES", f"{n_total_images} placeholders")
-                return imgs, n_total_images
-
-            # Landscape requests at 1920x1080 hit free provider rate limits hard
-            # when fired in bursts — cap concurrency to 2 to spread the load.
-            img_concurrency = 2 if max(spec.width, spec.height) >= 1280 else 4
-            imgs, pc = await generate_images(
-                image_prompts, img_dir, providers=providers,
-                max_concurrent=img_concurrency,
-                on_image_done=lambda i, is_pl: tracker.image_done(i, is_pl),
-                width=spec.width, height=spec.height,
-            )
-            detail = f"{len(imgs)} images"
-            if pc:
-                detail += f"  ({pc} placeholder)"
-            tracker.complete("IMAGES", detail)
-            return imgs, pc
-
-        images, placeholder_count = await _do_images()
-
-        # ── 4. Video clips ────────────────────────────────────────────────────
-        # 1. Create raw durations from audio parts
-        raw_clip_durations = []
-        for p_dur, n_imgs in part_mapping:
-            if n_imgs == 0:
-                continue
-            avg = p_dur / n_imgs
-            raw_clip_durations.extend([avg] * n_imgs)
-
-        # 2. Compensate for xfade transition overlaps
-        # sum(clip_durations) must be total_dur + (n_clips - 1) * trans_d
-        n_clips = len(images)
-        if n_clips == 0:
-            raise RuntimeError("no images were generated — cannot produce video")
-        trans_d = min(0.4, min(raw_clip_durations) * 0.25) if n_clips > 1 else 0
-        total_overlap = (n_clips - 1) * trans_d
-        extra_per_clip = total_overlap / n_clips
-        clip_durations = [d + extra_per_clip for d in raw_clip_durations]
-
-        # 3. Limit to spec.max_duration
-        if total_dur > spec.max_duration:
-            total_dur = spec.max_duration  # actual video duration after clamping
-            current_v_sum = 0.0
-            new_durations = []
-            for d in clip_durations:
-                if current_v_sum + d > spec.max_duration + total_overlap:
-                    break
-                new_durations.append(d)
-                current_v_sum += d
-            clip_durations = new_durations
-            images = images[:len(clip_durations)]
-            n_clips = len(images)
-
-        # 4. Music Beat Snapping
-        if music_path is not None and music_path.is_file():
-            beats = detect_beats(music_path)
-            if beats:
-                cut_t: list[float] = []
-                t = 0.0
-                for d in clip_durations[:-1]:
-                    t += d
-                    cut_t.append(t)
-                snapped = snap_to_beats(cut_t, beats) + [sum(clip_durations)]
-                clip_durations = [snapped[0]] + [
-                    max(0.5, snapped[i] - snapped[i - 1]) for i in range(1, len(snapped))
-                ]
-
-        motions = _pick_motions(n_clips)
-        color_grade = get_color_grade(style)
-        tracker.start("VIDEO", f"{n_clips} clips  Ken Burns · xfade")
-
-        with tempfile.TemporaryDirectory(prefix="ffai_") as tmp:
-            tmp_dir = Path(tmp)
-            clip_dir = tmp_dir / "clips"
-            clip_dir.mkdir()
-            clips_dict: dict[int, Path] = {}
-            done_clips = [0]
-            _clip_lock = threading.Lock()
-
-            def _render_clip(idx: int) -> tuple[int, Path]:
-                path = image_to_video(
-                    images[idx], clip_durations[idx],
-                    clip_dir / f"clip_{idx:03d}.mp4",
-                    spec=spec,
-                    motion=motions[idx],
-                    color_grade=color_grade,
-                )
-                with _clip_lock:
-                    done_clips[0] += 1
-                    tracker.update("VIDEO", done_clips[0], n_clips)
-                return idx, path
-
-            with ThreadPoolExecutor(max_workers=4) as ex:
-                for idx, path in ex.map(_render_clip, range(n_clips)):
-                    clips_dict[idx] = path
-
-            clips = [clips_dict[i] for i in range(n_clips)]
-            raw_video = tmp_dir / "raw.mp4"
-            with_audio_path = tmp_dir / "with_audio.mp4"
-
-            concat_with_transitions(clips, clip_durations, raw_video, transition_duration=trans_d)
-            merge_audio(raw_video, combined_audio, with_audio_path)
-
-            # Apply hook overlay (shorts only — landscape hook is multi-sentence prose)
-            if mode == "shorts":
-                captioned_hook = tmp_dir / "hooked.mp4"
-                add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
-            else:
-                captioned_hook = with_audio_path
-            tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
-
-            # ── 5. Captions ───────────────────────────────────────────────────
-            pre_caption = captioned_hook
-            if no_captions:
-                tracker.complete("CAPTIONS", "skipped (--no-captions)")
-                post_caption = pre_caption
-            else:
-                tracker.start("CAPTIONS", f"faster-whisper  [{caption_style}]")
+            if edit_script:
+                edit_file = job_dir / "script_edit.json"
+                edit_file.write_text(json.dumps(script, indent=2))
+                if tracker._live:
+                    tracker._live.stop()
+                editor = os.environ.get("EDITOR", "nano")
                 try:
-                    ass_path = tmp_dir / "captions.ass"
-                    subtitle_path = await asyncio.to_thread(
-                        audio_to_ass, combined_audio, ass_path, style=caption_style, mode=mode,
+                    subprocess.run([*shlex.split(editor), str(edit_file)])
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        f"editor not found: {editor!r} — set $EDITOR to an installed editor"
                     )
-                    captioned = tmp_dir / "captioned.mp4"
-                    await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
-                    # Export subtitle file alongside the output
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    sub_out = output_path.with_suffix(subtitle_path.suffix)
-                    shutil.copy2(subtitle_path, sub_out)
-                    tracker.complete("CAPTIONS", caption_style)
-                    post_caption = captioned
-                except Exception as cap_err:
-                    tracker.fail("CAPTIONS", f"skipped — {cap_err}")
-                    post_caption = pre_caption
+                script = _adapt_script(json.loads(edit_file.read_text()), topic=topic)
+                script_cache.write_text(json.dumps(script, indent=2))
+                hook = script["hook"]
+                segments = script["segments"]
+                cta = script["cta"]
+                if tracker._live:
+                    tracker._live.start()
+                report["script"]["source"] = "edited"
+                report["script"]["title"] = script.get("title", "")
+                report["script"]["segment_count"] = len(segments)
 
-            # ── 5a. Ambience ──────────────────────────────────────────────────
-            if no_ambience:
-                tracker.complete("AMBIENCE", "skipped (--no-ambience)")
-                pre_encode = post_caption
-            else:
-                tracker.start("AMBIENCE", "layered soundscapes")
-                final_audio_path = tmp_dir / "with_ambience.mp4"
-                add_ambience(post_caption, final_audio_path)
-                tracker.complete("AMBIENCE", "tech-hum layer added")
-                pre_encode = final_audio_path
+            if dry_run:
+                for stage_name in [s for s in stages if s != "SCRIPT"]:
+                    tracker.complete(stage_name, "skipped (dry run)")
+                report["captions"] = {
+                    "enabled": not no_captions,
+                    "status": "skipped (dry run)",
+                }
+                report["thumbnail_result"] = {
+                    "enabled": thumbnail,
+                    "status": "skipped (dry run)",
+                }
+                _finalize_run_report(
+                    report,
+                    job_dir,
+                    status="dry_run",
+                    elapsed_s=time.time() - start_time,
+                    extra={
+                        "artifacts": report["artifacts"],
+                        "script": report["script"],
+                        "captions": report["captions"],
+                        "thumbnail_result": report["thumbnail_result"],
+                    },
+                )
+                return output_path
 
-            # ── 6. Music ──────────────────────────────────────────────────────
+            current_stage = "TTS"
+            tts_dir = job_dir / "tts"
+            img_dir = job_dir / "images"
+            combined_audio = job_dir / "narration.mp3"
+
+            tts_dir.mkdir(parents=True, exist_ok=True)
+            img_dir.mkdir(parents=True, exist_ok=True)
+            report["artifacts"]["tts_dir"] = str(tts_dir)
+            report["artifacts"]["images_dir"] = str(img_dir)
+            report["artifacts"]["narration_path"] = str(combined_audio)
+
+            tts_rate = rate_for_mode(mode)
+            tracker.start("TTS", f"voice: {voice.split('-')[-1]}")
+
+            async def _do_tts_and_sync() -> tuple[Path, float, list[str], list[tuple[float, int]]]:
+                hook_audio = tts_dir / "hook.mp3"
+                cta_audio = tts_dir / "cta.mp3"
+                seg_paths = [tts_dir / f"seg_{i:03d}.mp3" for i in range(len(segments))]
+
+                all_texts = [hook["text"], cta["text"]] + [s["text"] for s in segments]
+                tts_hash = hashlib.sha256((voice + tts_rate + "".join(all_texts)).encode()).hexdigest()[:16]
+                hash_file = tts_dir / "hash.txt"
+                all_segs = [hook_audio] + seg_paths + [cta_audio]
+                tts_cached = (
+                    not fresh
+                    and hash_file.exists()
+                    and hash_file.read_text().strip() == tts_hash
+                    and all(p.exists() for p in all_segs)
+                )
+
+                if not tts_cached:
+                    await asyncio.gather(
+                        synthesize(hook["text"], hook_audio, voice=voice, rate=tts_rate),
+                        synthesize(cta["text"], cta_audio, voice=voice, rate=tts_rate),
+                        *[
+                            synthesize(seg["text"], seg_paths[i], voice=voice, rate=tts_rate)
+                            for i, seg in enumerate(segments)
+                        ],
+                    )
+                    hash_file.write_text(tts_hash)
+                report["cache_hits"]["tts"] = tts_cached
+
+                all_a = [hook_audio] + seg_paths + [cta_audio]
+                await asyncio.to_thread(concat_audio, all_a, combined_audio)
+                durs = await asyncio.gather(*[asyncio.to_thread(get_audio_duration, a) for a in all_a])
+                h_dur, *mid, c_dur = durs
+                seg_durs = mid
+
+                timeline_prompts: list[str] = []
+                part_mapping: list[tuple[float, int]] = []
+
+                timeline_prompts.extend(hook["visual_prompts"])
+                part_mapping.append((h_dur, len(hook["visual_prompts"])))
+                for i, seg in enumerate(segments):
+                    timeline_prompts.extend(seg["visual_prompts"])
+                    part_mapping.append((seg_durs[i], len(seg["visual_prompts"])))
+                timeline_prompts.extend(cta["visual_prompts"])
+                part_mapping.append((c_dur, len(cta["visual_prompts"])))
+
+                total_dur = sum(d for d, _ in part_mapping)
+                cache_note = "  (cached)" if tts_cached else ""
+                tracker.complete("TTS", f"{total_dur:.1f}s{cache_note}")
+                return combined_audio, total_dur, timeline_prompts, part_mapping
+
+            combined_audio, total_dur, image_prompts, part_mapping = await _do_tts_and_sync()
+            max_clip_duration = spec.max_visual_hold
+            image_prompts, part_mapping = _expand_timeline_for_pacing(
+                prompts=image_prompts,
+                part_mapping=part_mapping,
+                max_clip_duration=max_clip_duration,
+            )
+            report["duration_actual_s"] = round(total_dur, 2)
+            report["max_clip_duration_s"] = max_clip_duration
+            report["image_prompt_count"] = len(image_prompts)
+
+            current_stage = "IMAGES"
+            n_total_images = len(image_prompts)
+            tracker.start("IMAGES", f"{n_total_images} frames (synced)")
+            tracker.set_image_count(n_total_images)
+
+            async def _do_images() -> tuple[list[Path], int]:
+                provider_attempts: list[dict] = []
+                report["image_provider_attempts"] = provider_attempts
+
+                def _record_attempt(frame: int, provider: str, ok: bool) -> None:
+                    provider_attempts.append({"frame": frame, "provider": provider, "ok": ok})
+
+                if images_dir is not None:
+                    src = load_user_images(images_dir, n_total_images)
+                    imgs: list[Path] = []
+                    for i, s in enumerate(src):
+                        dst = img_dir / f"frame_{i:03d}{s.suffix.lower()}"
+                        shutil.copy2(s, dst)
+                        imgs.append(dst)
+                        tracker.image_done(i, False)
+                    tracker.complete("IMAGES", f"{len(imgs)} user images")
+                    return imgs, 0
+
+                cached_frames = sorted(img_dir.glob("frame_*.jpg")) if img_dir.is_dir() else []
+                if not fresh and len(cached_frames) == n_total_images:
+                    report["cache_hits"]["images"] = True
+                    imgs = cached_frames
+                    for i in range(len(imgs)):
+                        tracker.image_done(i, False)
+                    tracker.complete("IMAGES", f"{n_total_images} cached", cached=True)
+                    return imgs, 0
+
+                if not use_ai_images:
+                    from .ai.images import _make_placeholder
+
+                    imgs = [
+                        _make_placeholder(p, img_dir / f"frame_{i:03d}.jpg", spec.width, spec.height)
+                        for i, p in enumerate(image_prompts)
+                    ]
+                    for i in range(len(imgs)):
+                        tracker.image_done(i, True)
+                    tracker.complete("IMAGES", f"{n_total_images} placeholders")
+                    return imgs, n_total_images
+
+                img_concurrency = 2 if max(spec.width, spec.height) >= 1280 else 4
+                imgs, pc = await generate_images(
+                    image_prompts,
+                    img_dir,
+                    providers=providers,
+                    max_concurrent=img_concurrency,
+                    on_image_done=lambda i, is_pl: tracker.image_done(i, is_pl),
+                    on_attempt=_record_attempt,
+                    width=spec.width,
+                    height=spec.height,
+                )
+                detail = f"{len(imgs)} images"
+                if pc:
+                    detail += f"  ({pc} placeholder)"
+                tracker.complete("IMAGES", detail)
+                return imgs, pc
+
+            images, placeholder_count = await _do_images()
+            report["placeholder_count"] = placeholder_count
+
+            current_stage = "VIDEO"
+            plan = _plan_render(
+                images=images,
+                part_mapping=part_mapping,
+                total_dur=total_dur,
+                max_duration=spec.max_duration,
+                render_mode=render_mode,
+            )
+            images = plan.images
+            clip_durations = plan.clip_durations
+            total_dur = plan.total_duration
+            n_clips = plan.clip_count
+            trans_d = plan.transition_duration
+
             if music_path is not None and music_path.is_file():
-                tracker.start("MUSIC", f"{music_path.name}  sidechain")
-                with_music = tmp_dir / "with_music.mp4"
-                mix_music(pre_encode, music_path, with_music)
-                tracker.complete("MUSIC", "auto-ducked")
-                pre_encode = with_music
+                beats = detect_beats(music_path)
+                if beats:
+                    cut_t: list[float] = []
+                    t = 0.0
+                    for d in clip_durations[:-1]:
+                        t += d
+                        cut_t.append(t)
+                    snapped = snap_to_beats(cut_t, beats) + [sum(clip_durations)]
+                    clip_durations = [snapped[0]] + [
+                        max(0.5, snapped[i] - snapped[i - 1]) for i in range(1, len(snapped))
+                    ]
+                    plan.clip_durations = clip_durations
 
-            # ── 7. Export ─────────────────────────────────────────────────────
-            tracker.start("EXPORT", f"→ {output_path.name}")
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            encode_video(pre_encode, output_path, spec)
+            motions = _pick_motions(n_clips)
+            if render_mode in {"storyboard", "fast-preview"}:
+                motions = ["subtle_zoom"] * n_clips
+            color_grade = get_color_grade(style)
+            report["video"] = {
+                "clip_count": n_clips,
+                "render_mode": render_mode,
+                "transition_duration_s": round(trans_d, 3),
+                "color_grade": color_grade,
+            }
+            tracker.start("VIDEO", f"{n_clips} clips  {render_mode}")
 
-            thumb_note = ""
-            if thumbnail:
-                thumb_path = output_path.with_suffix(".thumb.jpg")
-                try:
-                    from .video.thumbnail import make_thumbnail_from_job
-                    script_title = script.get("title", topic)
-                    designed = make_thumbnail_from_job(
-                        job_dir=job_dir,
-                        title=script_title,
-                        output_path=thumb_path,
-                        mode=mode,
-                        brand_name=brand_name,
-                        accent_color=accent_color,
+            with tempfile.TemporaryDirectory(prefix="ffai_") as tmp:
+                tmp_dir = Path(tmp)
+                clip_dir = tmp_dir / "clips"
+                clip_dir.mkdir()
+                clips_dict: dict[int, Path] = {}
+                done_clips = [0]
+                clip_lock = threading.Lock()
+
+                def _render_clip(idx: int) -> tuple[int, Path]:
+                    path = image_to_video(
+                        images[idx],
+                        clip_durations[idx],
+                        clip_dir / f"clip_{idx:03d}.mp4",
+                        spec=spec,
+                        motion=motions[idx],
+                        color_grade=color_grade,
                     )
-                    if designed is not None:
-                        thumb_note = "  +thumb(designed)"
-                    else:
+                    with clip_lock:
+                        done_clips[0] += 1
+                        tracker.update("VIDEO", done_clips[0], n_clips)
+                    return idx, path
+
+                with ThreadPoolExecutor(max_workers=4) as ex:
+                    for idx, clip_path in ex.map(_render_clip, range(n_clips)):
+                        clips_dict[idx] = clip_path
+
+                clips = [clips_dict[i] for i in range(n_clips)]
+                raw_video = tmp_dir / "raw.mp4"
+                with_audio_path = tmp_dir / "with_audio.mp4"
+
+                if render_mode == "kenburns":
+                    concat_with_transitions(clips, clip_durations, raw_video, transition_duration=trans_d)
+                else:
+                    concat_plain(clips, raw_video)
+                merge_audio(raw_video, combined_audio, with_audio_path)
+
+                if mode == "shorts":
+                    captioned_hook = tmp_dir / "hooked.mp4"
+                    add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
+                else:
+                    captioned_hook = with_audio_path
+                tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
+
+                current_stage = "CAPTIONS"
+                pre_caption = captioned_hook
+                if no_captions:
+                    report["captions"] = {"enabled": False, "status": "skipped"}
+                    tracker.complete("CAPTIONS", "skipped (--no-captions)")
+                    post_caption = pre_caption
+                else:
+                    tracker.start("CAPTIONS", f"faster-whisper  [{caption_style}]")
+                    try:
+                        ass_path = tmp_dir / "captions.ass"
+                        subtitle_path = await asyncio.to_thread(
+                            audio_to_ass,
+                            combined_audio,
+                            ass_path,
+                            style=caption_style,
+                            mode=mode,
+                        )
+                        captioned = tmp_dir / "captioned.mp4"
+                        await asyncio.to_thread(burn_captions, pre_caption, subtitle_path, captioned)
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        sub_out = output_path.with_suffix(subtitle_path.suffix)
+                        shutil.copy2(subtitle_path, sub_out)
+                        report["captions"] = {
+                            "enabled": True,
+                            "status": "burned",
+                            "subtitle_path": str(sub_out),
+                            "format": subtitle_path.suffix.lstrip("."),
+                        }
+                        tracker.complete("CAPTIONS", caption_style)
+                        post_caption = captioned
+                    except Exception as cap_err:
+                        report["captions"] = {
+                            "enabled": True,
+                            "status": "failed",
+                            "error": str(cap_err),
+                        }
+                        tracker.fail("CAPTIONS", f"skipped — {cap_err}")
+                        post_caption = pre_caption
+
+                current_stage = "AMBIENCE"
+                if no_ambience:
+                    tracker.complete("AMBIENCE", "skipped (--no-ambience)")
+                    pre_encode = post_caption
+                else:
+                    tracker.start("AMBIENCE", "layered soundscapes")
+                    final_audio_path = tmp_dir / "with_ambience.mp4"
+                    add_ambience(post_caption, final_audio_path)
+                    tracker.complete("AMBIENCE", "tech-hum layer added")
+                    pre_encode = final_audio_path
+
+                current_stage = "MUSIC"
+                if music_path is not None and music_path.is_file():
+                    tracker.start("MUSIC", f"{music_path.name}  sidechain")
+                    with_music = tmp_dir / "with_music.mp4"
+                    mix_music(pre_encode, music_path, with_music)
+                    tracker.complete("MUSIC", "auto-ducked")
+                    pre_encode = with_music
+
+                current_stage = "EXPORT"
+                tracker.start("EXPORT", f"→ {output_path.name}")
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                encode_video(pre_encode, output_path, spec)
+                report["artifacts"]["video_path"] = str(output_path.resolve())
+
+                thumb_note = ""
+                if thumbnail:
+                    thumb_path = output_path.with_suffix(".thumb.jpg")
+                    try:
+                        from .video.thumbnail import make_thumbnail_from_job
+
+                        script_title = script.get("title", topic)
+                        designed = make_thumbnail_from_job(
+                            job_dir=job_dir,
+                            title=script_title,
+                            output_path=thumb_path,
+                            mode=mode,
+                            brand_name=brand_name,
+                            accent_color=accent_color,
+                        )
+                        if designed is not None:
+                            report["thumbnail_result"] = {
+                                "enabled": True,
+                                "status": "designed",
+                                "path": str(thumb_path),
+                            }
+                            thumb_note = "  +thumb(designed)"
+                        else:
+                            extract_thumbnail(output_path, thumb_path)
+                            report["thumbnail_result"] = {
+                                "enabled": True,
+                                "status": "extracted",
+                                "path": str(thumb_path),
+                            }
+                            thumb_note = "  +thumb"
+                    except Exception as thumb_err:
                         extract_thumbnail(output_path, thumb_path)
+                        report["thumbnail_result"] = {
+                            "enabled": True,
+                            "status": "extracted",
+                            "path": str(thumb_path),
+                            "fallback_error": str(thumb_err),
+                        }
                         thumb_note = "  +thumb"
-                except Exception:
-                    extract_thumbnail(output_path, thumb_path)
-                    thumb_note = "  +thumb"
+                else:
+                    report["thumbnail_result"] = {"enabled": False, "status": "skipped"}
 
-            tracker.complete("EXPORT", f"→ {output_path.name}{thumb_note}")
+                tracker.complete("EXPORT", f"→ {output_path.name}{thumb_note}")
 
-    elapsed = time.time() - start_time
-    img_src = (
-        str(images_dir) if images_dir
-        else ("AI (" + ", ".join(providers) + ")") if use_ai_images
-        else "placeholder"
-    )
-    placeholder_note = f"  ({placeholder_count} placeholder)" if placeholder_count else ""
-    console.print(Panel(
-        stats_table({
-            "output":     str(output_path.resolve()),
-            "duration":   f"{total_dur:.1f}s",
-            "elapsed":    f"{elapsed:.0f}s",
-            "model":      model,
-            "voice":      voice,
-            "images":     img_src + placeholder_note,
-            "style":      style or "default",
-            "captions":   caption_style,
-            "music":      music_path.name if music_path else "none",
-            "job cache":  str(job_dir),
-        }),
-        title="[bold green]done[/]", border_style="green", box=box.ROUNDED,
-    ))
-    return output_path
+        elapsed = time.time() - start_time
+        report_path = _finalize_run_report(
+            report,
+            job_dir,
+            status="succeeded",
+            elapsed_s=elapsed,
+            extra={
+                "artifacts": report["artifacts"],
+                "script": report["script"],
+                "captions": report["captions"],
+                "thumbnail_result": report["thumbnail_result"],
+                "placeholder_count": report["placeholder_count"],
+            },
+        )
+        img_src = (
+            str(images_dir)
+            if images_dir
+            else ("AI (" + ", ".join(providers) + ")") if use_ai_images
+            else "placeholder"
+        )
+        placeholder_note = f"  ({placeholder_count} placeholder)" if placeholder_count else ""
+        console.print(Panel(
+            stats_table({
+                "output": str(output_path.resolve()),
+                "duration": f"{total_dur:.1f}s",
+                "elapsed": f"{elapsed:.0f}s",
+                "model": model,
+                "voice": voice,
+                "images": img_src + placeholder_note,
+                "style": style or "default",
+                "captions": report["captions"].get("status", caption_style),
+                "music": music_path.name if music_path else "none",
+                "job cache": str(job_dir),
+                "run report": str(report_path),
+            }),
+            title="[bold green]done[/]",
+            border_style="green",
+            box=box.ROUNDED,
+        ))
+        return output_path
+    except Exception as err:
+        report["failed_stage"] = current_stage
+        _finalize_run_report(
+            report,
+            job_dir,
+            status="failed",
+            elapsed_s=time.time() - start_time,
+            extra={
+                "error": str(err),
+                "error_type": type(err).__name__,
+                "failed_stage": current_stage,
+                "artifacts": report["artifacts"],
+                "script": report["script"],
+                "captions": report["captions"],
+                "thumbnail_result": report["thumbnail_result"],
+                "placeholder_count": report["placeholder_count"],
+            },
+        )
+        raise
 
 
 def _pick_motions(n: int) -> list[str]:

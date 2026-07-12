@@ -13,12 +13,12 @@ from rich.live import Live
 console = Console(highlight=False)
 
 # ── Brand palette (centralised so every module can import) ────────────────────
-C_ACCENT   = "cyan"
+C_ACCENT   = "magenta"
 C_DIM      = "bright_black"
 C_SUCCESS  = "green"
 C_WARN     = "yellow"
 C_ERROR    = "red"
-C_RUNNING  = "cyan"
+C_RUNNING  = "magenta"
 C_CACHED   = "blue"
 C_MUTED    = "dim"
 
@@ -37,18 +37,18 @@ _LOGO: list[tuple[str, str]] = [
     ),
     (
         "  █████╗  █████╗  ██╔████╔██║██████╔╝█████╗  ██║  ███╗   ███████║██║",
-        "bold cyan",
+        "bold magenta",
     ),
     (
-        "  ██╔══╝  ██╔══╝  ██║╚██╔╝██║██╔═══╝ ██╔══╝  ██║   ██║   ██╔══██║██║",
-        "cyan",
+        "  ██╔══╝  ██╔══╝  ██║╚██╔╝██║██╔═══╝ ██╔══╝  ██╔══╝  ██║   ██╔══██║██║",
+        "magenta",
     ),
     (
         "  ██║     ██║     ██║ ╚═╝ ██║██║     ███████╗╚██████╔╝   ██║  ██║██║",
-        "cyan",
+        "bold magenta",
     ),
-    (_BOTTOM, "blue"),
-    (" " + _BOTTOM, "dim blue"),
+    (_BOTTOM, "magenta"),
+    (" " + _BOTTOM, "dim magenta"),
 ]
 
 _NOISE = "╔╗╚╝╠╣║═╦╩╬█▓▒░│─┤├┼▀▄·:?"
@@ -74,15 +74,15 @@ def _build(
     g = glitch or set()
     for i, (line, style) in enumerate(_LOGO):
         if i in g:
-            t.append(_static(len(line)) + "\n", style="dim cyan")
+            t.append(_static(len(line)) + "\n", style="dim magenta")
         elif i >= _N - revealed_lit:
             t.append(line + "\n", style=style)
         elif i < revealed_dim:
-            t.append(line + "\n", style="dim blue")
+            t.append(line + "\n", style="dim magenta")
         elif i == beam:
-            t.append(line + "\n", style="bold bright_white")
+            t.append(line + "\n", style="bold bright_magenta")
         else:
-            t.append(_static(len(line)) + "\n", style="dim blue")
+            t.append(_static(len(line)) + "\n", style="dim magenta")
     return t
 
 
@@ -108,7 +108,7 @@ def print_banner() -> None:
             time.sleep(0.035)
 
         final = _build(_N, _N)
-        final.append("\n" + _SUBTITLE + "\n", style="dim white")
+        final.append("\n" + _SUBTITLE + "\n", style="dim magenta")
         live.update(Align.center(final))
 
 

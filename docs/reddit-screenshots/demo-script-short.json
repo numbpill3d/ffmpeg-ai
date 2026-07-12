@@ -1,0 +1,25 @@
+{
+  "title": "CLI Video Pipeline",
+  "hook": {
+    "text": "One prompt goes in, and a video pipeline wakes up inside your terminal.",
+    "visual_prompts": ["black Linux terminal running ffmpeg-ai with cyan progress panels, cinematic close-up, 8k"]
+  },
+  "segments": [
+    {
+      "text": "It writes the script, makes the voiceover, builds visuals, then hands ffmpeg a clean final encode.",
+      "visual_prompts": [
+        "terminal pipeline stages labeled script tts images video captions export, cyan green ANSI colors, photorealistic",
+        "ffmpeg command output beside generated mp4 file in a project directory, dark terminal, crisp monospaced text"
+      ]
+    }
+  ],
+  "cta": {
+    "text": "That is the kind of AI tool the shell deserves.",
+    "visual_prompts": ["successful ffmpeg-ai complete panel in a terminal window, green checks, black background"]
+  },
+  "viral_package": {
+    "hashtags": ["#cli", "#ffmpeg", "#opensource"],
+    "description": "Terminal-native AI video generation using ffmpeg.",
+    "thumbnail_prompt": "Terminal screenshot, bold text: CLI VIDEO PIPELINE"
+  }
+}

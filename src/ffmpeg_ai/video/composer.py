@@ -156,6 +156,30 @@ def image_to_video(
     return output_path
 
 
+def concat_plain(video_paths: list[Path], output_path: Path) -> Path:
+    """Concatenate already-normalized clips without xfade transitions."""
+    if len(video_paths) == 0:
+        raise ValueError("concat_plain requires at least one clip")
+    if len(video_paths) == 1:
+        shutil.copy2(video_paths[0], output_path)
+        return output_path
+
+    list_path = output_path.with_suffix(".concat.txt")
+    lines = "".join(f"file '{p.resolve()}'\n" for p in video_paths)
+    list_path.write_text(lines, encoding="utf-8")
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(list_path),
+        "-c", "copy",
+        str(output_path),
+    ]
+    try:
+        _run(cmd, "concat_plain")
+    finally:
+        list_path.unlink(missing_ok=True)
+    return output_path
+
+
 # ── Concat ────────────────────────────────────────────────────────────────────
 
 _TRANSITION_TYPES = [

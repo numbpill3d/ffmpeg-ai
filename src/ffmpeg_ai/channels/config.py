@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -28,7 +29,7 @@ class ChannelConfig:
     category_id: str = "28"
     brand_name: str = ""          # shown on thumbnail bottom; defaults to display_name
     music_style: Optional[str] = None   # ambient/upbeat/dramatic/cinematic/None
-    accent_color: str = "#00d4ff"       # hex color for thumbnail accent bar
+    accent_color: str = "#c084ff"       # hex color for thumbnail accent bar
     youtube_secrets: Optional[str] = None
     youtube_token: Optional[str] = None
 
@@ -74,6 +75,11 @@ class ChannelConfig:
             errors.append(f"publish_hour must be 0–23, got {self.publish_hour}")
         if self.privacy not in ("public", "unlisted", "private"):
             errors.append(f"privacy must be public/unlisted/private, got '{self.privacy}'")
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", self.accent_color):
+            errors.append(
+                f"accent_color must be a 6-digit hex color like #00d4ff, got "
+                f"'{self.accent_color}'"
+            )
         if self.shorts_duration < 10 or self.shorts_duration > 58:
             errors.append(f"shorts_duration must be 10–58s, got {self.shorts_duration}")
         if self.landscape_duration < 60 or self.landscape_duration > 600:

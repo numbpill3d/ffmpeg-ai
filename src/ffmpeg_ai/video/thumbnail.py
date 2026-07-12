@@ -54,13 +54,16 @@ def _wrap_title(title: str, max_chars: int) -> str:
     words = title.split()
     lines: list[str] = []
     current: list[str] = []
-    for word in words:
+    for i, word in enumerate(words):
         test = " ".join(current + [word])
         if len(test) > max_chars and current:
             lines.append(" ".join(current))
             current = [word]
             if len(lines) == 2:
-                current.extend(words[words.index(word) + 1:])
+                # Add remaining words to current (use enumerate index, not list.index)
+                remaining = words[i + 1:]
+                if remaining:
+                    current.extend(remaining)
                 break
         else:
             current.append(word)
@@ -99,7 +102,7 @@ def make_thumbnail(
     output_path: Path,
     mode: str = "shorts",
     brand_name: str = "",
-    accent_color: str = "#00d4ff",
+    accent_color: str = "#c084ff",
 ) -> Path:
     """Generate a YouTube-ready thumbnail from a source image.
 
@@ -194,7 +197,7 @@ def make_thumbnail_from_job(
     output_path: Path,
     mode: str = "shorts",
     brand_name: str = "",
-    accent_color: str = "#00d4ff",
+    accent_color: str = "#c084ff",
 ) -> Optional[Path]:
     """Try to build a designed thumbnail from the job image cache.
 

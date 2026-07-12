@@ -1,6 +1,6 @@
 # ffmpeg-ai
 
-a python cli that generates youtube shorts (and landscape videos) end-to-end using only free ai services. give it a topic, get back a video with voiceover, burned captions, ken burns motion, and ai-generated visuals.
+a python cli that generates youtube shorts and landscape videos end-to-end using mostly free ai services. give it a topic, get back a video with voiceover, burned captions, paced visuals, thumbnails, and either cinematic ken burns motion or faster storyboard cuts.
 
 ---
 
@@ -20,13 +20,14 @@ a python cli that generates youtube shorts (and landscape videos) end-to-end usi
 
 1. generates a script from your topic via openrouter (free llm, auto-fallback through 6 models)
 2. synthesizes voiceover with edge-tts — hook, each segment, and cta in parallel
-3. fetches ai images synced to script segments (7 providers, cascading fallback)
-4. applies ken burns motion + random xfade transitions to build video clips
-5. transcribes audio locally with faster-whisper to produce burned-in captions
-6. optionally mixes background music with sidechain compression
-7. final encode to spec (shorts 9:16 or landscape 16:9)
+3. expands the visual timeline so no segment holds one image forever
+4. fetches ai images synced to script segments (7 providers, cascading fallback)
+5. renders either cinematic ken burns clips or faster storyboard cuts
+6. transcribes audio locally with faster-whisper to produce burned-in captions
+7. optionally mixes background music with sidechain compression
+8. final encode to spec (shorts 9:16 or landscape 16:9)
 
-output includes a thumbnail jpeg alongside the mp4.
+output includes a thumbnail jpeg and a machine-readable run report alongside the mp4/job cache.
 
 ---
 
@@ -55,8 +56,12 @@ cp .env.example .env
 # basic short
 ffmpeg-ai generate "the history of the moon"
 
-# landscape video (up to 10 min)
+# landscape video (up to 10 min, storyboard render by default)
 ffmpeg-ai generate "history of the roman empire" --mode landscape -d 300
+
+# force cinematic ken burns + xfade, or a fast storyboard proof
+ffmpeg-ai generate "lost unix workstations" --mode landscape --render-mode kenburns
+ffmpeg-ai generate "lost unix workstations" --mode landscape --render-mode fast-preview
 
 # style preset
 ffmpeg-ai generate "deep sea creatures" --style dramatic
@@ -84,18 +89,33 @@ ffmpeg-ai generate "the history of the moon" --fresh
 
 # dry run — script only, no video rendered
 ffmpeg-ai generate "any topic" --dry-run
+
+# launch the desktop control panel
+ffmpeg-ai gui
 ```
 
 ---
 
 ## output modes
 
-| mode      | resolution    | aspect | max length |
-|-----------|---------------|--------|------------|
-| shorts    | 1080 × 1920   | 9:16   | 58 seconds |
-| landscape | 1920 × 1080   | 16:9   | 10 minutes |
+| mode      | resolution    | aspect | max length | default render |
+|-----------|---------------|--------|------------|----------------|
+| shorts    | 1080 × 1920   | 9:16   | 58 seconds | kenburns       |
+| landscape | 1920 × 1080   | 16:9   | 10 minutes | storyboard     |
 
-both modes use h.264 + aac, burned-in captions, ken burns motion, and xfade transitions.
+both modes use h.264 + aac, burned-in captions, and paced visual prompts.
+
+---
+
+## render modes (`--render-mode`)
+
+| render mode  | best for | behavior |
+|--------------|----------|----------|
+| kenburns     | shorts, cinematic promos | per-image motion clips plus xfade transitions |
+| storyboard   | longform, essay, slide-card videos | quick still-card cuts without expensive xfade chains |
+| fast-preview | proof renders | storyboard-style preview path for checking script, timing, and visuals before a slower final render |
+
+if omitted, shorts use `kenburns`; landscape uses `storyboard` so 5–10 minute videos don't crawl through a giant xfade furnace by default.
 
 ---
 
@@ -108,6 +128,10 @@ both modes use h.264 + aac, burned-in captions, ken burns motion, and xfade tran
 | listicle     | countdown format, numbered points, fast cuts      |
 | documentary  | journalistic, reflective, context → story → insight |
 | morris       | empirical, intimate, pharmacological precision — Hamilton Morris register |
+| mythology    | epic oral-tradition storytelling around gods, heroes, and places |
+| finance      | practical money explanations with concrete numbers and actions |
+| horror       | slow-burn dread with restrained escalation |
+| curiosity    | wonder-driven explanations of impossible-sounding facts |
 
 ---
 
@@ -146,6 +170,7 @@ each job is cached at `~/.cache/ffmpeg-ai/jobs/<slug>/`:
 - `script.json` — reused on re-run unless `--fresh`
 - `images/frame_*.jpg` — reused if count matches
 - `tts/` — cached by script+voice+rate hash; re-synthesized on any change
+- `run_report.json` — machine-readable summary of the run: cache hits, render mode, visual pacing, provider attempts, caption/thumbnail outcome, placeholders, and artifact paths
 
 re-running the same topic resumes from cached data automatically.
 
@@ -168,6 +193,7 @@ src/ffmpeg_ai/
 └── ui/
     ├── display.py        # animated ascii banner
     └── widgets.py        # rich live pipeline tracker
+└── gui.py               # retro Tk desktop operator panel
 ```
 
 ---
@@ -192,6 +218,7 @@ src/ffmpeg_ai/
 ```bash
 uv pip install -e ".[dev]"
 ruff check src/
+pytest
 ```
 
 ---

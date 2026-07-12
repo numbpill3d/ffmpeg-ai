@@ -20,11 +20,14 @@ from .ui.display import (
     C_ACCENT, C_DIM, C_ERROR, C_MUTED, C_SUCCESS,
     bullet, console, error, header, info, print_banner, success, warn,
 )
+from .ai.images import _ALL_PROVIDERS
 from .ai.openrouter import FREE_MODELS, STYLE_PRESETS
 from .ai.tts import VOICES, STYLE_VOICE_MAP
 from .video.shorts import MODES
 
 load_dotenv()
+
+_JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
 
 app = typer.Typer(
     name="ffmpeg-ai",
@@ -36,9 +39,232 @@ app = typer.Typer(
 
 _STYLE_CHOICES   = list(STYLE_PRESETS.keys())
 _CAPTION_CHOICES = ["karaoke", "plain", "bold-center"]
-_ALL_PROVIDERS = [
-    "bfl", "fal", "prodia", "pollinations", "huggingface", "stable_horde", "together",
-]
+_RENDER_CHOICES = ["kenburns", "storyboard", "fast-preview"]
+
+
+def _run_async(coro):
+    return asyncio.run(coro)
+
+
+def _validate_hex_color(value: str) -> str:
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        error(f"invalid hex color '{value}' — expected format like #00d4ff")
+        raise typer.Exit(1)
+    return value
+
+
+def _parse_provider_list(providers: Optional[str]) -> Optional[list[str]]:
+    if providers is None:
+        return None
+    selected = [p.strip() for p in providers.split(",") if p.strip()]
+    if not selected:
+        error("--providers was supplied but no provider names were found")
+        raise typer.Exit(1)
+    unknown = [p for p in selected if p not in _ALL_PROVIDERS]
+    if unknown:
+        error(
+            f"unknown provider(s): {', '.join(unknown)} — choose from: "
+            f"{', '.join(_ALL_PROVIDERS)}"
+        )
+        raise typer.Exit(1)
+    return selected
+
+
+async def _run_batch_async(
+    *,
+    topics: list[str],
+    out_dir: Path,
+    mode: str,
+    duration: int,
+    model: str,
+    voice: str,
+    style: Optional[str],
+    caption_style: str,
+    render_mode: Optional[str],
+    no_thumbnail: bool,
+    no_ambience: bool,
+    fresh: bool,
+    quiet: bool,
+    brand_name: str,
+    accent_color: str,
+) -> int:
+    from .pipeline import run_pipeline
+
+    failed = 0
+    for i, topic in enumerate(topics, 1):
+        console.print()
+        console.print(Rule(
+            f"[{C_ACCENT}]{i}/{len(topics)}[/]  {topic}",
+            style=C_DIM,
+        ))
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
+        out = out_dir / f"{ts}_{slug}.mp4"
+        try:
+            await run_pipeline(
+                topic=topic,
+                output_path=out,
+                mode=mode,
+                duration=min(duration, 600),
+                model=model,
+                voice=voice,
+                style=style,
+                caption_style=caption_style,
+                render_mode=render_mode,
+                thumbnail=not no_thumbnail,
+                no_ambience=no_ambience,
+                fresh=fresh,
+                quiet=quiet,
+                brand_name=brand_name,
+                accent_color=accent_color,
+            )
+        except Exception as e:
+            error(f"topic {i} failed: {e}")
+            failed += 1
+    return failed
+
+
+async def _run_auto_async(
+    *,
+    count: int,
+    upload: bool,
+    privacy: str,
+    style: Optional[str],
+    voice: str,
+    quiet: bool,
+    dry_run: bool,
+    brand_name: str,
+    accent_color: str,
+) -> None:
+    import json as _json
+    from .auto.harvest import harvest, save_seen
+    from .auto.youtube import upload_video, is_configured
+    from .pipeline import run_pipeline
+
+    header("harvesting topics", f"count={count}")
+    topics = await harvest(count=count)
+
+    if not topics:
+        error("no topics found — try again later")
+        raise typer.Exit(1)
+
+    for topic in topics:
+        bullet(topic)
+
+    if dry_run:
+        info("dry-run — stopping before generation")
+        return
+
+    save_seen(topics)
+
+    out_dir = Path.home() / "Videos" / "ffmpeg-ai" / "auto"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    generated: list[tuple[str, Path]] = []
+    for i, topic in enumerate(topics, 1):
+        console.print()
+        console.print(Rule(
+            f"[{C_ACCENT}]{i}/{len(topics)}[/]  {topic}",
+            style=C_DIM,
+        ))
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
+        out = out_dir / f"{ts}_{slug}.mp4"
+        try:
+            await run_pipeline(
+                topic=topic,
+                output_path=out,
+                mode="shorts",
+                duration=45,
+                voice=voice,
+                style=style,
+                quiet=quiet,
+                thumbnail=True,
+                brand_name=brand_name,
+                accent_color=accent_color,
+            )
+            generated.append((topic, out))
+        except Exception as e:
+            error(str(e))
+
+    if not upload:
+        console.print()
+        success(f"{len(generated)} Short(s) in {out_dir}")
+        info("add --upload to auto-publish to YouTube")
+        return
+
+    if not is_configured():
+        warn("YouTube not configured — run: ffmpeg-ai youtube-setup")
+        return
+
+    uploaded = 0
+    console.print()
+    console.print(Rule(f"[{C_ACCENT}]uploading[/]", style=C_DIM))
+
+    for topic, out in generated:
+        job_slug = re.sub(r"[^a-z0-9-]+", "-", topic.lower().strip())[:48].strip("-") or "untitled"
+        script_p = _JOB_CACHE / job_slug / "script.json"
+        script = _json.loads(script_p.read_text()) if script_p.exists() else {}
+        viral = script.get("viral_package", {})
+        title = script.get("title") or topic
+        desc = viral.get("description") or f"{topic} #shorts"
+        tags = viral.get("hashtags") or ["#shorts", "#tech"]
+        thumb = out.with_suffix(".thumb.jpg")
+
+        info(f"uploading: {title}")
+        try:
+            url = upload_video(
+                video_path=out,
+                title=title,
+                description=desc,
+                tags=tags,
+                thumbnail_path=thumb if thumb.exists() else None,
+                privacy=privacy,
+            )
+            success(url)
+            uploaded += 1
+        except Exception as e:
+            error(f"upload failed: {e}")
+
+    console.print()
+    success(f"{uploaded}/{len(generated)} uploaded")
+
+
+async def _run_channels_async(
+    *,
+    channel_names: list[str],
+    shorts: bool,
+    landscape: bool,
+    upload: Optional[bool],
+    count: int,
+    model: str,
+    quiet: bool,
+    dry_run: bool,
+) -> None:
+    from .channels.config import ChannelConfig
+    from .channels.runner import run_channel
+
+    for ch_name in channel_names:
+        try:
+            ch = ChannelConfig.load(ch_name)
+        except FileNotFoundError as e:
+            error(str(e))
+            continue
+        errs = ch.validate()
+        if errs:
+            for e in errs:
+                error(f"config error ({ch_name}): {e}")
+            continue
+        await run_channel(
+            channel=ch,
+            shorts=shorts,
+            landscape=landscape,
+            upload=upload,
+            count=count,
+            quiet=quiet,
+            model=model,
+            dry_run=dry_run,
+        )
 
 
 # ── Help screen ───────────────────────────────────────────────────────────────
@@ -84,7 +310,10 @@ def _help_flags() -> Panel:
         ("--images-dir  -I",  "–",         "use local images instead of AI"),
         ("--script",          "–",         "load script JSON, skip LLM"),
         ("--caption-style",   "karaoke",   "karaoke  plain  bold-center"),
+        ("--render-mode",     "auto",      "kenburns  storyboard  fast-preview"),
         ("--providers",       "all",       "provider order: pollinations,hf,..."),
+        ("--brand-name",      "–",         "channel name for thumbnail branding"),
+        ("--accent-color",    "#c084ff",   "hex color for thumbnail accent bar"),
         ("--edit-script",     "off",       "open script in $EDITOR before render"),
         ("--fresh",           "off",       "ignore all cached job data"),
         ("--dry-run",         "off",       "script only, no video rendered"),
@@ -189,10 +418,13 @@ def generate(
     no_thumbnail: bool = typer.Option(False, "--no-thumbnail"),
     style: Optional[str] = typer.Option(None, "--style"),
     caption_style: str   = typer.Option("karaoke", "--caption-style"),
+    render_mode: Optional[str] = typer.Option(None, "--render-mode"),
     no_captions: bool    = typer.Option(False, "--no-captions"),
     no_ambience: bool    = typer.Option(False, "--no-ambience"),
+    brand_name: str      = typer.Option("", "--brand-name", help="Channel name for thumbnail branding"),
+    accent_color: str    = typer.Option("#c084ff", "--accent-color", help="Hex color for thumbnail accent bar"),
 ):
-    """[bold cyan]Generate a video from a topic string.[/]"""
+    """[bold magenta]Generate a video from a topic string.[/]"""
     print_banner()
 
     if not os.environ.get("OPENROUTER_API_KEY", "") and script is None:
@@ -214,6 +446,13 @@ def generate(
         error(f"unknown caption-style '{caption_style}' — choose from: {', '.join(_CAPTION_CHOICES)}")  # noqa: E501
         raise typer.Exit(1)
 
+    render_mode = render_mode if isinstance(render_mode, str) else None
+    if render_mode is not None and render_mode not in _RENDER_CHOICES:
+        error(f"unknown render-mode '{render_mode}' — choose from: {', '.join(_RENDER_CHOICES)}")
+        raise typer.Exit(1)
+
+    accent_color = _validate_hex_color(accent_color)
+
     if images_dir is not None and not images_dir.is_dir():
         error(f"--images-dir not found: {images_dir}")
         raise typer.Exit(1)
@@ -230,10 +469,10 @@ def generate(
         ts     = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         output = Path.home() / "Videos" / "ffmpeg-ai" / f"{ts}.mp4"
 
-    provider_list = [p.strip() for p in providers.split(",")] if providers else None
+    provider_list = _parse_provider_list(providers)
 
     from .pipeline import run_pipeline
-    asyncio.run(run_pipeline(
+    _run_async(run_pipeline(
         topic=topic,
         mode=mode,
         output_path=output,
@@ -252,8 +491,11 @@ def generate(
         thumbnail=not no_thumbnail,
         style=style,
         caption_style=caption_style,
+        render_mode=render_mode,
         no_captions=no_captions,
         no_ambience=no_ambience,
+        brand_name=brand_name,
+        accent_color=accent_color,
     ))
 
 
@@ -271,12 +513,15 @@ def batch(
     voice: str         = typer.Option("en-female", "-v", "--voice"),
     style: Optional[str]   = typer.Option(None, "--style"),
     caption_style: str     = typer.Option("karaoke", "--caption-style"),
+    render_mode: Optional[str] = typer.Option(None, "--render-mode"),
     no_thumbnail: bool = typer.Option(False, "--no-thumbnail"),
     no_ambience: bool  = typer.Option(False, "--no-ambience"),
     fresh: bool        = typer.Option(False, "--fresh"),
     quiet: bool        = typer.Option(False, "-q", "--quiet"),
+    brand_name: str    = typer.Option("", "--brand-name", help="Channel name for thumbnail branding"),
+    accent_color: str  = typer.Option("#c084ff", "--accent-color", help="Hex color for thumbnail accent bar"),
 ):
-    """[bold cyan]Generate multiple videos from a file of topics (one per line).[/]"""
+    """[bold magenta]Generate multiple videos from a file of topics (one per line).[/]"""
     if not os.environ.get("OPENROUTER_API_KEY", ""):
         error("OPENROUTER_API_KEY not set")
         raise typer.Exit(1)
@@ -284,6 +529,21 @@ def batch(
     if mode not in MODES:
         error(f"unknown mode '{mode}' — choose from: {', '.join(MODES)}")
         raise typer.Exit(1)
+
+    if style and style not in _STYLE_CHOICES:
+        error(f"unknown style '{style}' — choose from: {', '.join(_STYLE_CHOICES)}")
+        raise typer.Exit(1)
+
+    if caption_style not in _CAPTION_CHOICES:
+        error(f"unknown caption-style '{caption_style}' — choose from: {', '.join(_CAPTION_CHOICES)}")  # noqa: E501
+        raise typer.Exit(1)
+
+    render_mode = render_mode if isinstance(render_mode, str) else None
+    if render_mode is not None and render_mode not in _RENDER_CHOICES:
+        error(f"unknown render-mode '{render_mode}' — choose from: {', '.join(_RENDER_CHOICES)}")
+        raise typer.Exit(1)
+
+    accent_color = _validate_hex_color(accent_color)
 
     if not topics_file.is_file():
         error(f"file not found: {topics_file}")
@@ -309,37 +569,24 @@ def batch(
         f"[bold {C_ACCENT}]batch[/]  [dim]{len(topics)} topics → {out_dir}[/]", style=C_DIM,
     ))
 
-    from .pipeline import run_pipeline
     selected_voice = VOICES.get(voice, voice)
-    failed = 0
-
-    for i, topic in enumerate(topics, 1):
-        console.print()
-        console.print(Rule(
-            f"[{C_ACCENT}]{i}/{len(topics)}[/]  {topic}",
-            style=C_DIM,
-        ))
-        ts  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
-        out  = out_dir / f"{ts}_{slug}.mp4"
-        try:
-            asyncio.run(run_pipeline(
-                topic=topic,
-                output_path=out,
-                mode=mode,
-                duration=min(duration, 600),
-                model=model,
-                voice=selected_voice,
-                style=style,
-                caption_style=caption_style,
-                thumbnail=not no_thumbnail,
-                no_ambience=no_ambience,
-                fresh=fresh,
-                quiet=quiet,
-            ))
-        except Exception as e:
-            error(f"topic {i} failed: {e}")
-            failed += 1
+    failed = _run_async(_run_batch_async(
+        topics=topics,
+        out_dir=out_dir,
+        mode=mode,
+        duration=duration,
+        model=model,
+        voice=selected_voice,
+        style=style,
+        caption_style=caption_style,
+        render_mode=render_mode,
+        no_thumbnail=no_thumbnail,
+        no_ambience=no_ambience,
+        fresh=fresh,
+        quiet=quiet,
+        brand_name=brand_name,
+        accent_color=accent_color,
+    ))
 
     console.print()
     if failed == 0:
@@ -437,6 +684,13 @@ def providers() -> None:
     ))
 
 
+@app.command()
+def gui() -> None:
+    """[dim]Launch the retro desktop control panel.[/]"""
+    from .gui import main as gui_main
+    gui_main()
+
+
 # ── auto ──────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -448,94 +702,27 @@ def auto(
     voice: str  = typer.Option("en-female", "-v", "--voice"),
     quiet: bool = typer.Option(False, "-q", "--quiet"),
     dry_run: bool = typer.Option(False, "--dry-run"),
+    brand_name: str = typer.Option("", "--brand-name", help="Channel name for thumbnail branding"),
+    accent_color: str = typer.Option("#c084ff", "--accent-color", help="Hex color for thumbnail accent bar"),
 ) -> None:
-    """[bold cyan]Auto-pilot: harvest trending topics → generate Shorts → upload.[/]"""
-    import json as _json
-    from .auto.harvest import harvest, save_seen
-    from .auto.youtube import upload_video, is_configured
-
+    """[bold magenta]Auto-pilot: harvest trending topics → generate Shorts → upload.[/]"""
     print_banner()
-
-    header("harvesting topics", f"count={count}")
-    topics = asyncio.run(harvest(count=count))
-
-    if not topics:
-        error("no topics found — try again later")
+    if style and style not in _STYLE_CHOICES:
+        error(f"unknown style '{style}' — choose from: {', '.join(_STYLE_CHOICES)}")
         raise typer.Exit(1)
-
-    for t in topics:
-        bullet(t)
-
-    if dry_run:
-        info("dry-run — stopping before generation")
-        return
-
-    save_seen(topics)
-
-    out_dir = Path.home() / "Videos" / "ffmpeg-ai" / "auto"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    from .pipeline import run_pipeline
+    accent_color = _validate_hex_color(accent_color)
     selected_voice = VOICES.get(voice, voice)
-    generated: list[tuple[str, Path]] = []
-
-    for i, topic in enumerate(topics, 1):
-        console.print()
-        console.print(Rule(
-            f"[{C_ACCENT}]{i}/{len(topics)}[/]  {topic}",
-            style=C_DIM,
-        ))
-        ts   = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        slug = re.sub(r"[^a-z0-9]+", "-", topic.lower())[:32].strip("-")
-        out  = out_dir / f"{ts}_{slug}.mp4"
-        try:
-            asyncio.run(run_pipeline(
-                topic=topic, output_path=out, mode="shorts", duration=45,
-                voice=selected_voice, style=style, quiet=quiet, thumbnail=True,
-            ))
-            generated.append((topic, out))
-        except Exception as e:
-            error(str(e))
-
-    if not upload:
-        console.print()
-        success(f"{len(generated)} Short(s) in {out_dir}")
-        info("add --upload to auto-publish to YouTube")
-        return
-
-    if not is_configured():
-        warn("YouTube not configured — run: ffmpeg-ai youtube-setup")
-        return
-
-    _JOB_CACHE = Path.home() / ".cache" / "ffmpeg-ai" / "jobs"
-    uploaded = 0
-    console.print()
-    console.print(Rule(f"[{C_ACCENT}]uploading[/]", style=C_DIM))
-
-    for topic, out in generated:
-        job_slug = re.sub(r"[^a-z0-9-]+", "-", topic.lower().strip())[:48].strip("-") or "untitled"
-        script_p = _JOB_CACHE / job_slug / "script.json"
-        script   = _json.loads(script_p.read_text()) if script_p.exists() else {}
-        viral    = script.get("viral_package", {})
-        title    = script.get("title") or topic
-        desc     = viral.get("description") or f"{topic} #shorts"
-        tags     = viral.get("hashtags") or ["#shorts", "#tech"]
-        thumb    = out.with_suffix(".thumb.jpg")
-
-        info(f"uploading: {title}")
-        try:
-            url = upload_video(
-                video_path=out, title=title, description=desc, tags=tags,
-                thumbnail_path=thumb if thumb.exists() else None,
-                privacy=privacy,
-            )
-            success(url)
-            uploaded += 1
-        except Exception as e:
-            error(f"upload failed: {e}")
-
-    console.print()
-    success(f"{uploaded}/{len(generated)} uploaded")
+    _run_async(_run_auto_async(
+        count=count,
+        upload=upload,
+        privacy=privacy,
+        style=style,
+        voice=selected_voice,
+        quiet=quiet,
+        dry_run=dry_run,
+        brand_name=brand_name,
+        accent_color=accent_color,
+    ))
 
 
 # ── youtube-setup ─────────────────────────────────────────────────────────────
@@ -657,13 +844,12 @@ def channel_run(
     quiet: bool = typer.Option(False, "-q", "--quiet"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Harvest only, no generation"),
 ) -> None:
-    """[bold cyan]Run a channel (or all channels): harvest → generate → upload.[/]"""
+    """[bold magenta]Run a channel (or all channels): harvest → generate → upload.[/]"""
     if not os.environ.get("OPENROUTER_API_KEY", ""):
         error("OPENROUTER_API_KEY not set")
         raise typer.Exit(1)
 
     from .channels.config import ChannelConfig
-    from .channels.runner import run_channel
 
     names = [name] if name else ChannelConfig.list_all()
     if not names:
@@ -671,23 +857,16 @@ def channel_run(
         raise typer.Exit(0)
 
     print_banner()
-
-    for ch_name in names:
-        try:
-            ch = ChannelConfig.load(ch_name)
-        except FileNotFoundError as e:
-            error(str(e))
-            continue
-        errs = ch.validate()
-        if errs:
-            for e in errs:
-                error(f"config error ({ch_name}): {e}")
-            continue
-        asyncio.run(run_channel(
-            channel=ch, shorts=shorts, landscape=landscape,
-            upload=upload, count=count, quiet=quiet,
-            model=model, dry_run=dry_run,
-        ))
+    _run_async(_run_channels_async(
+        channel_names=names,
+        shorts=shorts,
+        landscape=landscape,
+        upload=upload,
+        count=count,
+        model=model,
+        quiet=quiet,
+        dry_run=dry_run,
+    ))
 
 
 @channel_app.command("status")
@@ -969,7 +1148,7 @@ def music_fetch(
         error(f"unknown style '{style}' — choose from: {', '.join(valid)}")
         raise typer.Exit(1)
     info(f"fetching {style} tracks (min {count})…")
-    tracks = asyncio.run(_ensure_cached(style, min_tracks=count))
+    tracks = _run_async(_ensure_cached(style, min_tracks=count))
     if tracks:
         success(f"{len(tracks)} track(s) cached for style '{style}'")
         for t in tracks:

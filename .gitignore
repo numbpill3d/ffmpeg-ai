@@ -1,7 +1,10 @@
 .env
 __pycache__/
+**/__pycache__/
 *.pyc
 *.egg-info/
 dist/
 .venv/
+.pytest_cache/
+.poolside/
 output/

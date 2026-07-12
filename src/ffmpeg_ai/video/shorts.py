@@ -9,6 +9,7 @@ class VideoSpec:
     fps: int = 30
     max_duration: int = 600  # 10 minutes
     aspect: str = "9:16"
+    max_visual_hold: float = 6.0
 
     def get_args(self) -> list[str]:
         return [
@@ -28,8 +29,8 @@ class VideoSpec:
         ]
 
 MODES = {
-    "shorts": VideoSpec(1080, 1920, aspect="9:16", max_duration=58),
-    "landscape": VideoSpec(1920, 1080, aspect="16:9"),
+    "shorts": VideoSpec(1080, 1920, aspect="9:16", max_duration=58, max_visual_hold=4.0),
+    "landscape": VideoSpec(1920, 1080, aspect="16:9", max_visual_hold=6.0),
 }
 
 FPS = 30

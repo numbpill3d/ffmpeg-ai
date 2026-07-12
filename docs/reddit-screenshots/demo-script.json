@@ -1,0 +1,50 @@
+{
+  "title": "Why Terminals Keep Coming Back",
+  "hook": {
+    "text": "The command line did not survive because it is old. It survived because it is faster than explaining yourself to a button.",
+    "visual_prompts": [
+      "close-up of a black Linux terminal prompt glowing cyan on a laptop screen, hands ready over keyboard, cinematic low light, 8k"
+    ]
+  },
+  "segments": [
+    {
+      "text": "A GUI is a place you visit. A CLI is a language you reuse. Once a command works, it becomes a spell you can save, pipe, schedule, and share.",
+      "visual_prompts": [
+        "developer chaining shell commands with pipes on a dark terminal, blue and red ANSI text, shallow depth of field, cinematic",
+        "notebook beside laptop showing a copied shell one-liner becoming an automated script, hard shadows, photorealistic"
+      ]
+    },
+    {
+      "text": "That is why AI belongs here. Not as a chatbot tab, but as another executable that reads files, renders media, and leaves artifacts behind.",
+      "visual_prompts": [
+        "AI assistant represented as terminal output generating media files in a project directory, black screen, cyan highlights, photorealistic",
+        "filesystem tree with generated mp4, captions, images, and report files displayed in a terminal, crisp monospaced text, cinematic"
+      ]
+    },
+    {
+      "text": "ffmpeg-ai turns one topic into a video pipeline: script, voice, visuals, captions, music, thumbnail, and final encode.",
+      "visual_prompts": [
+        "ffmpeg video timeline rendered as terminal progress stages, script tts images captions export, neon cyan accents, 8k",
+        "vertical YouTube short preview beside a terminal running ffmpeg filters, command line production studio, moody lighting"
+      ]
+    },
+    {
+      "text": "The best interface is not the prettiest one. It is the one you can compose with everything else you already use.",
+      "visual_prompts": [
+        "Linux desktop with terminal, file manager, and generated video thumbnail arranged like a tiny production workstation, natural lighting",
+        "close-up of terminal prompt returning a completed mp4 path, green checkmark, black background, crisp monospaced text"
+      ]
+    }
+  ],
+  "cta": {
+    "text": "If your workflow starts in a shell, why should your video tool live anywhere else?",
+    "visual_prompts": [
+      "command prompt waiting after successful video generation, ffmpeg-ai complete panel, cyan and green terminal colors, photorealistic"
+    ]
+  },
+  "viral_package": {
+    "hashtags": ["#cli", "#ffmpeg", "#opensource"],
+    "description": "A terminal-native AI video pipeline built around ffmpeg.",
+    "thumbnail_prompt": "High contrast terminal screenshot, bold text: CLI VIDEO PIPELINE"
+  }
+}

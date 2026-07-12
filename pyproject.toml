@@ -27,9 +27,20 @@ dev = ["ruff", "pytest", "pytest-asyncio"]
 
 [project.scripts]
 ffmpeg-ai = "ffmpeg_ai.cli:app"
+ffmpeg-ai-gui = "ffmpeg_ai.gui:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ffmpeg_ai"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/ffmpeg_ai",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/.env.example",
+    "/pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100
