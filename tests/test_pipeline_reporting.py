@@ -100,3 +100,84 @@ def test_generate_image_reports_provider_attempts(tmp_path: Path, monkeypatch: p
     assert path == tmp_path / "frame.jpg"
     assert is_placeholder is False
     assert attempts == [("bfl", False), ("pollinations", True)]
+
+
+def test_cached_placeholder_images_are_rejected(tmp_path: Path) -> None:
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    for i in range(3):
+        (img_dir / f"frame_{i:03d}.jpg").write_bytes(b"fake jpg")
+    (img_dir / "manifest.json").write_text(
+        '{"placeholder_count": 3, "providers": ["pollinations"]}',
+        encoding="utf-8",
+    )
+
+    cache_ok, cached_frames = pipeline._cached_images_are_valid(
+        img_dir,
+        3,
+        signature="abc",
+    )
+
+    assert cache_ok is False
+    assert len(cached_frames) == 3
+
+
+def test_cached_real_images_are_accepted(tmp_path: Path) -> None:
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    for i in range(2):
+        (img_dir / f"frame_{i:03d}.jpg").write_bytes(b"fake jpg")
+    (img_dir / "manifest.json").write_text(
+        '{"placeholder_count": 0, "signature": "abc", "providers": ["pollinations"]}',
+        encoding="utf-8",
+    )
+
+    cache_ok, cached_frames = pipeline._cached_images_are_valid(
+        img_dir,
+        2,
+        signature="abc",
+    )
+
+    assert cache_ok is True
+    assert len(cached_frames) == 2
+
+
+def test_cached_images_reject_signature_mismatch(tmp_path: Path) -> None:
+    img_dir = tmp_path / "images"
+    img_dir.mkdir()
+    for i in range(2):
+        (img_dir / f"frame_{i:03d}.jpg").write_bytes(b"fake jpg")
+    (img_dir / "manifest.json").write_text(
+        '{"placeholder_count": 0, "signature": "abc", "providers": ["pollinations"]}',
+        encoding="utf-8",
+    )
+
+    cache_ok, cached_frames = pipeline._cached_images_are_valid(
+        img_dir,
+        2,
+        signature="xyz",
+    )
+
+    assert cache_ok is False
+    assert len(cached_frames) == 2
+
+
+def test_cached_real_images_fall_back_to_run_report(tmp_path: Path) -> None:
+    job_dir = tmp_path / "job"
+    img_dir = job_dir / "images"
+    img_dir.mkdir(parents=True)
+    for i in range(2):
+        (img_dir / f"frame_{i:03d}.jpg").write_bytes(b"fake jpg")
+    (job_dir / "run_report.json").write_text(
+        '{"placeholder_count": 0, "status": "succeeded"}',
+        encoding="utf-8",
+    )
+
+    cache_ok, cached_frames = pipeline._cached_images_are_valid(
+        img_dir,
+        2,
+        signature="xyz",
+    )
+
+    assert cache_ok is True
+    assert len(cached_frames) == 2

@@ -213,6 +213,88 @@ def _expand_timeline_for_pacing(
     return expanded, expanded_mapping
 
 
+def _image_manifest_path(img_dir: Path) -> Path:
+    return img_dir / "manifest.json"
+
+
+def _image_cache_signature(
+    *,
+    prompts: list[str],
+    width: int,
+    height: int,
+    use_ai_images: bool,
+    providers: list[str],
+) -> str:
+    payload = {
+        "prompts": prompts,
+        "width": width,
+        "height": height,
+        "use_ai_images": use_ai_images,
+        "providers": providers,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _read_image_manifest(img_dir: Path) -> dict | None:
+    path = _image_manifest_path(img_dir)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
+
+
+def _read_image_run_report(img_dir: Path) -> dict | None:
+    path = img_dir.parent / "run_report.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError):
+        return None
+
+
+def _cached_images_are_valid(
+    img_dir: Path,
+    expected_count: int,
+    *,
+    signature: str,
+) -> tuple[bool, list[Path]]:
+    """Reuse cached frames only when the cache says they are real generated images.
+
+    The cache must match both the expected frame count and the current prompt
+    signature. This prevents stale images from being reused after the script or
+    render inputs change.
+    """
+    cached_frames = sorted(img_dir.glob("frame_*.jpg")) if img_dir.is_dir() else []
+    if len(cached_frames) != expected_count:
+        return False, cached_frames
+
+    manifest = _read_image_manifest(img_dir)
+    if manifest:
+        try:
+            placeholder_count = int(manifest.get("placeholder_count", 0))
+        except (TypeError, ValueError):
+            return False, cached_frames
+        if placeholder_count != 0:
+            return False, cached_frames
+        if manifest.get("signature") != signature:
+            return False, cached_frames
+        return True, cached_frames
+
+    run_report = _read_image_run_report(img_dir)
+    if not run_report:
+        return False, cached_frames
+
+    try:
+        placeholder_count = int(run_report.get("placeholder_count", 0))
+    except (TypeError, ValueError):
+        return False, cached_frames
+    return placeholder_count == 0, cached_frames
+
+
 def _default_render_mode(mode: str) -> str:
     return "storyboard" if mode == "landscape" else "kenburns"
 
@@ -552,6 +634,13 @@ async def run_pipeline(
             report["duration_actual_s"] = round(total_dur, 2)
             report["max_clip_duration_s"] = max_clip_duration
             report["image_prompt_count"] = len(image_prompts)
+            image_cache_sig = _image_cache_signature(
+                prompts=image_prompts,
+                width=spec.width,
+                height=spec.height,
+                use_ai_images=use_ai_images,
+                providers=providers,
+            )
 
             current_stage = "IMAGES"
             n_total_images = len(image_prompts)
@@ -576,8 +665,12 @@ async def run_pipeline(
                     tracker.complete("IMAGES", f"{len(imgs)} user images")
                     return imgs, 0
 
-                cached_frames = sorted(img_dir.glob("frame_*.jpg")) if img_dir.is_dir() else []
-                if not fresh and len(cached_frames) == n_total_images:
+                cache_ok, cached_frames = _cached_images_are_valid(
+                    img_dir,
+                    n_total_images,
+                    signature=image_cache_sig,
+                )
+                if not fresh and cache_ok:
                     report["cache_hits"]["images"] = True
                     imgs = cached_frames
                     for i in range(len(imgs)):
@@ -595,6 +688,21 @@ async def run_pipeline(
                     for i in range(len(imgs)):
                         tracker.image_done(i, True)
                     tracker.complete("IMAGES", f"{n_total_images} placeholders")
+                    manifest_path = _image_manifest_path(img_dir)
+                    manifest_path.write_text(
+                        json.dumps(
+                            {
+                                "placeholder_count": n_total_images,
+                                "signature": image_cache_sig,
+                                "provider_attempts": [],
+                                "use_ai_images": use_ai_images,
+                                "providers": providers,
+                            },
+                            indent=2,
+                        ),
+                        encoding="utf-8",
+                    )
+                    report["artifacts"]["image_manifest_path"] = str(manifest_path)
                     return imgs, n_total_images
 
                 img_concurrency = 2 if max(spec.width, spec.height) >= 1280 else 4
@@ -612,6 +720,21 @@ async def run_pipeline(
                 if pc:
                     detail += f"  ({pc} placeholder)"
                 tracker.complete("IMAGES", detail)
+                manifest_path = _image_manifest_path(img_dir)
+                manifest_path.write_text(
+                    json.dumps(
+                        {
+                            "placeholder_count": pc,
+                            "signature": image_cache_sig,
+                            "provider_attempts": report.get("image_provider_attempts", []),
+                            "use_ai_images": use_ai_images,
+                            "providers": providers,
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                report["artifacts"]["image_manifest_path"] = str(manifest_path)
                 return imgs, pc
 
             images, placeholder_count = await _do_images()
