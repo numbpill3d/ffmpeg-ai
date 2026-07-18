@@ -90,9 +90,27 @@ ffmpeg-ai generate "the history of the moon" --fresh
 # dry run — script only, no video rendered
 ffmpeg-ai generate "any topic" --dry-run
 
+# skip the hook text overlay (useful on Windows where fontconfig is missing)
+ffmpeg-ai generate "topic" --no-hook
+
+# force a specific font for overlays/captions (.ttf path)
+ffmpeg-ai generate "topic" --font /path/to/MyFont-Bold.ttf
+
 # launch the desktop control panel
 ffmpeg-ai gui
 ```
+
+### windows / hook overlay
+
+on windows, ffmpeg has no fontconfig, so the hook text overlay can fail with
+`Fontconfig error: Cannot load default config file` and previously aborted the
+whole pipeline. that is now handled:
+
+- the pipeline auto-detects common windows fonts (`C:\Windows\Fonts\*.ttf`).
+- if drawtext still fails, the overlay is skipped with a warning and the
+  pipeline continues to captions/export (the video is not lost).
+- `--no-hook` skips the overlay entirely; `--font <path>` forces a specific
+  `.ttf`. both flags also work on `batch`.
 
 ---
 

@@ -69,6 +69,8 @@ class JobSpec:
     no_thumbnail: bool = False
     no_ambience: bool = False
     no_captions: bool = False
+    no_hook: bool = False
+    font_path: str = ""
     no_ai_images: bool = False
     channel_name: str = ""
     lines: int = 5
@@ -120,6 +122,10 @@ def build_command(spec: JobSpec) -> list[str]:
             cmd.append("--no-captions")
         if spec.no_ai_images:
             cmd.append("--no-ai-images")
+        if spec.no_hook:
+            cmd.append("--no-hook")
+        if spec.font_path:
+            cmd += ["--font", spec.font_path]
         cmd.append("--quiet")
         return cmd
 
@@ -153,6 +159,10 @@ def build_command(spec: JobSpec) -> list[str]:
             cmd.append("--no-thumbnail")
         if spec.no_ambience:
             cmd.append("--no-ambience")
+        if spec.no_hook:
+            cmd.append("--no-hook")
+        if spec.font_path:
+            cmd += ["--font", spec.font_path]
         cmd.append("--quiet")
         return cmd
 

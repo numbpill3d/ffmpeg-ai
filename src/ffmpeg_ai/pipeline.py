@@ -20,7 +20,7 @@ from typing import Optional
 from rich.panel import Panel
 from rich import box
 
-from .ui.display import console
+from .ui.display import console, warn
 from .ui.widgets import PipelineTracker, stats_table
 from .ai.openrouter import generate_script, FREE_MODELS
 from .ai.images import generate_images, load_user_images, _ALL_PROVIDERS as _IMG_PROVIDERS
@@ -55,18 +55,47 @@ def _slug(topic: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", topic.lower().strip())[:48].strip("-") or "untitled"
 
 
-def _find_font() -> str:
-    """Return path to a bold sans-serif font, or empty string to use ffmpeg's default."""
+def _find_font(font_override: Optional[str] = None) -> str:
+    """Return path to a bold sans-serif font, or empty string to use ffmpeg's default.
+
+    On Windows ffmpeg has no fontconfig, so a missing font makes drawtext fail
+    hard. We therefore also probe common Windows font directories. A caller can
+    force a specific font via ``font_override`` (e.g. from ``--font``).
+    """
+    if font_override:
+        if Path(font_override).is_file():
+            return str(font_override)
+        warn(f"--font path not found: {font_override}; falling back to auto-detect")
+
     candidates = [
+        # Linux
         "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/DejaVuSans-Bold.ttf",
-        # Additional common font locations
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/TTF/LiberationSans-Bold.ttf",
+        # macOS
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+        # Windows
+        r"C:\Windows\Fonts\arial.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+        r"C:\Windows\Fonts\segoeui.ttf",
+        r"C:\Windows\Fonts\segoeuib.ttf",
+        r"C:\Windows\Fonts\calibrib.ttf",
+        r"C:\Windows\Fonts\DejaVuSans-Bold.ttf",
     ]
-    return next((f for f in candidates if Path(f).exists()), "")
+    found = next((f for f in candidates if Path(f).exists()), "")
+    if not found:
+        # last resort: walk the Windows font dir if it exists
+        win_fonts = Path(r"C:\Windows\Fonts")
+        if win_fonts.is_dir():
+            for cand in win_fonts.glob("*.ttf"):
+                if "bold" in cand.name.lower() or cand.name.lower().startswith("arial"):
+                    found = str(cand)
+                    break
+    return found
 
 
 def _check_ffmpeg() -> None:
@@ -98,6 +127,7 @@ def _init_run_report(
     dry_run: bool,
     no_captions: bool,
     no_ambience: bool,
+    no_hook: bool,
     brand_name: str,
     accent_color: str,
     render_mode: str = "kenburns",
@@ -134,6 +164,7 @@ def _init_run_report(
         "dry_run": dry_run,
         "no_captions": no_captions,
         "no_ambience": no_ambience,
+        "no_hook": no_hook,
         "status": "running",
     }
 
@@ -382,6 +413,8 @@ async def run_pipeline(
     caption_style: str = "karaoke",
     no_captions: bool = False,
     no_ambience: bool = False,
+    no_hook: bool = False,
+    font_path: Optional[str] = None,
     brand_name: str = "",
     accent_color: str = "#c084ff",
     render_mode: Optional[str] = None,
@@ -399,6 +432,9 @@ async def run_pipeline(
     style:            tone preset: educational, dramatic, listicle, documentary.
     caption_style:    karaoke, plain, or bold-center.
     no_captions:      skip transcription and caption burn entirely.
+    no_ambience:      skip the ambience audio layer.
+    no_hook:          skip the hook text overlay entirely (Windows-safe).
+    font_path:        explicit .ttf path for overlays/captions (else auto-detected).
     """
     _check_ffmpeg()
     if mode not in MODES:
@@ -433,6 +469,7 @@ async def run_pipeline(
         dry_run=dry_run,
         no_captions=no_captions,
         no_ambience=no_ambience,
+        no_hook=no_hook,
         brand_name=brand_name,
         accent_color=accent_color,
     )
@@ -440,6 +477,7 @@ async def run_pipeline(
     report["artifacts"] = {}
     report["script"] = {"source": None, "title": None, "segment_count": 0}
     report["captions"] = {"enabled": not no_captions, "status": "pending"}
+    report["hook_overlay"] = {"enabled": (not no_hook) and (mode == "shorts"), "status": "pending"}
     report["thumbnail_result"] = {"enabled": thumbnail, "status": "pending"}
     report["placeholder_count"] = 0
     report["failed_stage"] = None
@@ -816,9 +854,31 @@ async def run_pipeline(
                     concat_plain(clips, raw_video)
                 merge_audio(raw_video, combined_audio, with_audio_path)
 
-                if mode == "shorts":
+                if mode == "shorts" and not no_hook:
                     captioned_hook = tmp_dir / "hooked.mp4"
-                    add_hook_overlay(with_audio_path, hook["text"], _find_font(), captioned_hook)
+                    try:
+                        add_hook_overlay(
+                            with_audio_path,
+                            hook["text"],
+                            _find_font(font_override=font_path),
+                            captioned_hook,
+                        )
+                        report["hook_overlay"] = {
+                            "enabled": True,
+                            "status": "burned",
+                            "font": _find_font(font_override=font_path) or "ffmpeg-default",
+                        }
+                    except Exception as hook_err:
+                        # drawtext can fail on platforms without fontconfig
+                        # (e.g. Windows). Don't abort the whole pipeline — keep
+                        # the clean video and continue to captions/export.
+                        report["hook_overlay"] = {
+                            "enabled": True,
+                            "status": "failed",
+                            "error": str(hook_err),
+                        }
+                        warn(f"hook overlay skipped — {hook_err}")
+                        captioned_hook = with_audio_path
                 else:
                     captioned_hook = with_audio_path
                 tracker.complete("VIDEO", f"{n_clips} clips  {total_dur:.1f}s")
