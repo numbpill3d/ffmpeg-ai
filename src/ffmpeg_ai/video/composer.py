@@ -32,6 +32,12 @@ def _run(cmd: list[str], label: str = "ffmpeg"):
     return result
 
 
+def _concat_file_entry(path: Path) -> str:
+    """Return an ffconcat file entry with embedded apostrophes escaped."""
+    escaped = str(path.resolve()).replace("'", "'\\''")
+    return f"file '{escaped}'\n"
+
+
 def get_audio_duration(audio_path: Path) -> float:
     """Return duration of an audio file in seconds."""
     cmd = [
@@ -165,7 +171,7 @@ def concat_plain(video_paths: list[Path], output_path: Path) -> Path:
         return output_path
 
     list_path = output_path.with_suffix(".concat.txt")
-    lines = "".join(f"file '{p.resolve()}'\n" for p in video_paths)
+    lines = "".join(_concat_file_entry(p) for p in video_paths)
     list_path.write_text(lines, encoding="utf-8")
     cmd = [
         "ffmpeg", "-y",
